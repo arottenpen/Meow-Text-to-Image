@@ -11,7 +11,7 @@ import {worldMacros,patchWorldMacros} from './src/resources/world-macros.js';
 import {generationTimeoutSeconds} from './src/generation/generation-timeout.js';
 import {fingerprintKey,runWithQueue,validateQueueURL} from './src/queue/cloud-queue.js';
 import {randomId} from './src/platform/browser-crypto.js';
-import {createThumbnails,imageBlob,blobBase64,localImagePath,makeThumbnail} from './src/images/image-thumbnails.js';
+import {createThumbnails,blobBase64,localImagePath,makeThumbnail} from './src/images/image-thumbnails.js';
 import {createFavorites,validateFavorite,favoritesEnabled,FAVORITE_FOLDER,FAVORITE_IMAGE_LIMIT} from './src/prompts/prompt-favorites.js';
 import {generationOptions,migrateGenerationOptions,migrateGenerationMode,runGenerationTask} from './src/generation/generation-options.js';
 import {waitForGeneration} from './src/generation/generation-delay.js';
@@ -107,12 +107,15 @@ if(generationOptionsMigrated||connectionMigrated||generationModeMigrated)save();
 const enqueue=run=>{const job=queue.then(run);queue=job.catch(()=>{});return job;};
 const persistSettings=()=>persistHostSettings({saveNow:async()=>{const host=await import('../../../../script.js');return host.saveSettings();},source:ctx().eventSource,event:ctx().eventTypes.SETTINGS_UPDATED});
 const favorites=createFavorites({settings,persist:persistSettings});
-const thumbnails=createThumbnails({fetchImage:url=>hostFetch(url),saveImage:saveBase64AsFile});
+const thumbnails=createThumbnails({fetchImage:url=>hostFetch(url),saveImage:saveBase64AsFile,onReady:(_url,target)=>{
+    for(const image of document.querySelectorAll('img[data-thumbnail-url]'))if(image.dataset.thumbnailUrl===target&&image.dataset.thumbnailState!=='ready')image.src=target;
+}});
 const imagePresentation=createImagePresentation({getFormat:()=>settings.exportFormat,fetchImage:url=>hostFetch(url),saveJPEG:async(blob,folder,name)=>saveBase64AsFile(await blobBase64(blob),folder,name,'jpg'),onError:error=>notices.error('JPG 转换失败：'+error.message,'图片预览')});
 const bindImage=(image,url,options)=>imagePresentation.bind(image,url,options);
 async function saveGeneratedImage(data,folder,name){
     const url=await inStage('image-save',()=>saveBase64AsFile(data,folder,name,'png'));
-    try{await thumbnails.ensure(url,imageBlob(data));}catch{notices.warning('原图已保存，缩略图未生成，可在图片页重试','喵喵文生图');}
+    // Queue only the saved URL: do not retain generated Base64/Blobs while waiting.
+    void thumbnails.ensure(url).catch(()=>notices.warning('原图已保存，缩略图未生成，可在图片页重试','喵喵文生图'));
     return url;
 }
 const resourceUpdater=createResourceUpdater({settings,localBase:base,save,onChange:()=>{eggMarkerCache.invalidate();settingsHost?.dispatchEvent(new Event('miao-resources-changed'));},onAvailable:({latest})=>notices.info(`${latest.worldName} 可更新，点此查看`,'喵喵文生图',{escapeHtml:true,timeOut:10000,onclick:()=>openSettings('resources')})});
@@ -1011,10 +1014,10 @@ async function deleteImages(folder,names,{parent,preserveSamples=false,days}={})
     if(names.length>24)question.append(el('p',`共 ${names.length} 张，下方预览前 24 张。`));
     question.append(previews);
     if(!await confirmSettings(question,'删除图片',{parent}))return false;
-    const removed=[];let failure;
+    const removed=[],removedThumbnails=[];let failure;
     for(const name of names) {
         if(protectedImage(allowed.get(name)))continue;
-        try {await imageAPI('delete',{path:`user/images/${allowed.get(name).folder}/${name}`});removed.push(name);}
+        try {const thumbnail=await thumbnails.remove(allowed.get(name).url,()=>imageAPI('delete',{path:`user/images/${allowed.get(name).folder}/${name}`}));removed.push(name);removedThumbnails.push(thumbnail);}
         catch(error){failure=error;break;}
     }
     const paths=removed.map(name=>`user/images/${allowed.get(name).folder}/${name}`);let changed=false;
@@ -1025,6 +1028,7 @@ async function deleteImages(folder,names,{parent,preserveSamples=false,days}={})
     for(const p of settings.profiles)if(p.preview?.url){try{const loc=imageArchiveLocation(p.preview.url,location.href);if(paths.includes(`user/images/${loc.folder}/${loc.name}`)){delete p.preview;save();settingsHost?.dispatchEvent(new Event('miao-profile-previews'));}}catch{}}
     if(changed)await ctx().saveChat();renderAll();
     for(const name of removed){try{await imageAPI('delete',{path:await imagePresentation.forget(allowed.get(name).url)});}catch{}}
+    for(const path of removedThumbnails){try{await imageAPI('delete',{path});}catch{}}
     if(removed.length)notices.success(`已清理 ${removed.length} 张图片`);
     if(failure)throw failure;
     return true;

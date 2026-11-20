@@ -26,17 +26,58 @@ export async function makeThumbnail(blob){
     }finally{image.close?.();canvas.width=canvas.height=0;}
 }
 export function blobBase64(blob){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('图片读取失败'));reader.readAsDataURL(blob);});}
-export function createThumbnails({fetchImage,saveImage,base=()=>location.href}){
-    const pending=new Map();
+export function createThumbnails({fetchImage,saveImage,base=()=>location.href,onReady=()=>{},convert=makeThumbnail,encode=blobBase64,concurrency=2}){
+    if(!Number.isInteger(concurrency)||concurrency<1)throw Error('缩略图并发数必须为正整数');
+    const pending=new Map(),deleting=new Map(),waiting=[];let active=0;
+    const work=async task=>{
+        const name=await thumbnailName(task.path,task.base),target=`/user/images/${THUMBNAIL_FOLDER}/${name}`;
+        if(task.cancelled)return null;
+        let source=task.source;task.source=null;
+        if(!source){
+            const cached=await fetchImage(target);if(task.cancelled)return null;if(cached.ok)return target;
+            const response=await fetchImage(task.path);if(task.cancelled)return null;
+            if(!response.ok)throw Error('原图读取失败');source=await response.blob();
+        }
+        if(task.cancelled)return null;
+        const thumb=await convert(source);source=null;if(task.cancelled)return null;
+        const data=await encode(thumb);if(task.cancelled)return null;
+        await saveImage(data,THUMBNAIL_FOLDER,name.replace(/\.jpg$/,''),'jpg');
+        return task.cancelled?null:target;
+    };
+    const pump=()=>{
+        while(active<concurrency&&waiting.length){
+            const task=waiting.shift();task.started=true;active++;
+            const finish=()=>{task.source=null;pending.delete(task.path);active--;pump();};
+            void work(task).then(target=>{
+                finish();
+                if(target&&!task.cancelled){try{onReady(task.path,target);}catch{}}
+                task.resolve(target);
+            },error=>{finish();task.reject(error);});
+        }
+    };
     return {
         async ensure(url,source){
-            const path=localImagePath(url,base());if(pending.has(path))return pending.get(path);
-            const work=(async()=>{
-                const name=await thumbnailName(url,base()),target=`/user/images/${THUMBNAIL_FOLDER}/${name}`;
-                if(!source){const cached=await fetchImage(target);if(cached.ok)return target;const response=await fetchImage(path);if(!response.ok)throw Error('原图读取失败');source=await response.blob();}
-                const thumb=await makeThumbnail(source);await saveImage(await blobBase64(thumb),THUMBNAIL_FOLDER,name.replace(/\.jpg$/,''),'jpg');return target;
-            })();pending.set(path,work);
-            try{return await work;}finally{pending.delete(path);}
+            const origin=base(),path=localImagePath(url,origin);
+            if(deleting.has(path)){await deleting.get(path);return null;}
+            if(pending.has(path))return pending.get(path).promise;
+            const task={path,base:origin,source,started:false,cancelled:false};
+            task.promise=new Promise((resolve,reject)=>{task.resolve=resolve;task.reject=reject;});
+            pending.set(path,task);waiting.push(task);pump();return task.promise;
+        },
+        async remove(url,removeOriginal){
+            const origin=base(),path=localImagePath(url,origin);
+            if(deleting.has(path))return deleting.get(path);
+            // Lock the path before yielding. Queued work drops its source;
+            // in-flight uploads finish before deletion, so they cannot recreate it.
+            const task=pending.get(path);if(task){task.cancelled=true;task.source=null;}
+            if(task&&!task.started){waiting.splice(waiting.indexOf(task),1);pending.delete(path);task.resolve(null);}
+            const removal=Promise.resolve().then(async()=>{
+                try{await task?.promise;}catch{}
+                const target=(await thumbnailURL(path,origin)).slice(1);
+                await removeOriginal();return target;
+            });
+            deleting.set(path,removal);
+            try{return await removal;}finally{deleting.delete(path);}
         },
     };
 }
