@@ -26,8 +26,10 @@ test('conversion failure never falls back to exposing the original PNG in JPG mo
 test('cached JPEGs survive a new presentation instance and concurrent conversions share work and stay bounded',async()=>{
  let converting=0,peak=0;const f=fixture({convert:async()=>{converting++;peak=Math.max(peak,converting);await tick();converting--;return {blob:jpg};}});
  for(let i=0;i<6;i++)f.files.set(`/image-${i}.png`,png);
- await Promise.all([...Array.from({length:6},(_,i)=>f.presentation.jpeg(`/image-${i}.png`)),f.presentation.jpeg('/image-0.png')]);assert.equal(peak,2);assert.equal(f.writes.length,6);assert.equal(f.reads.filter(url=>url==='/image-0.png').length,1);
- const cached=fixture({fetchImage:async url=>f.files.has(url)?new Response(f.files.get(url)):new Response('',{status:404}),convert:async()=>{throw Error('should reuse JPEG');}});assert.equal(await cached.presentation.jpeg('/image-0.png'),f.writes[0].url);
+ const results=await Promise.all([...Array.from({length:6},(_,i)=>f.presentation.jpeg(`/image-${i}.png`)),f.presentation.jpeg('/image-0.png')]);assert.equal(peak,2);assert.equal(f.writes.length,6);assert.equal(f.reads.filter(url=>url==='/image-0.png').length,1);
+ // Promise.all preserves input order; concurrent writes may finish in any order.
+ assert.equal(results[0],results[6]);assert.ok(f.writes.some(item=>item.url===results[0]));
+ const cached=fixture({fetchImage:async url=>f.files.has(url)?new Response(f.files.get(url)):new Response('',{status:404}),convert:async()=>{throw Error('should reuse JPEG');}});assert.equal(await cached.presentation.jpeg('/image-0.png'),results[0]);
  await assert.rejects(cached.presentation.jpeg('https://other.test/image.png'),/当前酒馆/);
 });
 test('lazy images wait until visible and a format refresh updates only bound plugin images',async()=>{
