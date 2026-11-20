@@ -35,6 +35,28 @@ test('settings home and dragging preserve drafts and leave the chat interactive 
     await page.locator('.miao-tabs').getByRole('button',{name:section,exact:true}).click();
     const metrics=await page.locator('.miao-panel-body').evaluate(element=>({height:element.clientHeight,overflow:element.scrollWidth-element.clientWidth}));assert.ok(metrics.height>100);assert.ok(metrics.overflow<=1);
    }
+   await page.locator('.miao-tabs').getByRole('button',{name:'配置',exact:true}).click();
+   await page.getByLabel('前置正面提示词',{exact:true}).focus();
+   const immediate=await page.evaluate(()=>{
+    const p=window.preview,root=document.querySelector('.miao-settings'),field=[...root.querySelectorAll('textarea')].find(input=>input.closest('label').textContent==='前置正面提示词');
+    window.inputSaveCalls=0;window.originalPanelSave=p.context.saveSettingsDebounced;
+    p.context.saveSettingsDebounced=function(...args){window.inputSaveCalls++;return window.originalPanelSave.apply(this,args);};
+    window.typingField=field;field.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+    for(let i=0;i<100;i++){field.value='中文输入 '+i;field.dispatchEvent(new Event('input',{bubbles:true}));}
+    return {calls:window.inputSaveCalls,draft:p.settings.profiles[p.settings.active].positive,same:document.activeElement===field};
+   });
+   assert.deepEqual(immediate,{calls:0,draft:'中文输入 99',same:true});
+   await page.waitForTimeout(350);assert.equal(await page.evaluate(()=>window.inputSaveCalls),0,'IME must not trigger persistence mid-composition');
+   await page.evaluate(()=>window.typingField.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true})));
+   await page.waitForFunction(()=>window.inputSaveCalls===1);
+   assert.equal(await page.evaluate(()=>window.typingField===document.activeElement),true,'typing retains focus and its original control');
+   await page.evaluate(()=>{window.typingField.value='关闭前的草稿';window.typingField.dispatchEvent(new Event('input',{bubbles:true}));});
+   await page.getByRole('button',{name:'关闭设置',exact:true}).click();await shell.waitFor({state:'detached'});
+   assert.equal(await page.evaluate(()=>window.preview.settings.profiles[window.preview.settings.active].positive),'关闭前的草稿');
+   assert.equal(await page.evaluate(()=>window.inputSaveCalls),2);
+   await page.waitForTimeout(350);assert.equal(await page.evaluate(()=>window.inputSaveCalls),2,'closing clears pending persistence timers');
+   await page.evaluate(()=>{window.preview.context.saveSettingsDebounced=window.originalPanelSave;});
+   await page.locator('#miao-nai-menu').click();await shell.waitFor();
    for(const width of [320,375,430,1280]){
     await page.setViewportSize({width,height:780});if(tt)await page.getByRole('button',{name:'返回主页',exact:true}).tap();else await page.getByRole('button',{name:'返回主页',exact:true}).click();
     await page.waitForFunction(()=>{const r=document.querySelector('.miao-settings-window').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1;});

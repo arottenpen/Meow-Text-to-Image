@@ -1076,7 +1076,7 @@ async function openSettings(initialTab,initialFavorite,initialPage) {
         settingsPopup=popup;popup.dlg.classList.add('miao-settings-dialog');
         if(initialPage)showPanelPage(initialPage.content,{...initialPage.options,parent:popup.dlg}).finally(()=>{if(popup.completeAffirmative)popup.completeAffirmative();else popup.dlg.close();}).catch(errorPopup);
     }});}
-    finally{pendingSettingsConfirm?.(false);settingsHost=null;settingsPopup=null;}
+    finally{panel.disposeSettings();pendingSettingsConfirm?.(false);settingsHost=null;settingsPopup=null;}
 }
 function mountMenu() {
     document.getElementById('miao-nai-settings')?.remove();
