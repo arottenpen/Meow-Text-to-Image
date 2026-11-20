@@ -49,7 +49,7 @@ test('real end, stop and chat-change handlers cancel pending scans and retain th
     const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
     for(const event of ['GENERATION_ENDED','GENERATION_STOPPED','CHAT_CHANGED']){
         let cancelled=0,rendered=0,generated=0;const handlers={};
-        const context={c:{eventSource:{on:(name,fn)=>handlers[name]=fn},eventTypes:{[event]:event}},generationChat:'chat',currentChat:()=> 'chat',streamActive:true,autoSession:{},streamScanner:{cancel(){cancelled++;}},renderAll(){rendered++;},scheduleRender(){rendered++;},autoLatest(){generated++;},settings:{mode:'stream',eggProfileEnabled:false},setTimeout(){},guard:fn=>fn,indexChatImages(){}};
+        const context={c:{eventSource:{on:(name,fn)=>handlers[name]=fn},eventTypes:{[event]:event}},generationChat:'chat',currentChat:()=> 'chat',streamActive:true,autoSession:{},streamScanner:{cancel(){cancelled++;}},renderAll(){rendered++;},scheduleRender(){rendered++;},autoLatest(){generated++;},settings:{mode:'stream',eggProfileEnabled:false},chatRenderer:{cancel(){}},autoScheduled:false,ctx:()=>({chat:[]}),latestImageMessage:()=>null,setTimeout(){},guard:fn=>fn,indexChatImages(){}};
         vm.createContext(context);
         const line=source.split('\n').find(line=>line.includes('c.eventSource.on(c.eventTypes.'+event+','));assert.ok(line);
         vm.runInContext(line,context);handlers[event]();

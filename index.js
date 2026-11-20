@@ -1,3 +1,4 @@
+import {createRenderScheduler} from './src/chat/render-scheduler.js';
 import {worldOptions,patchWorldOptions} from './src/resources/world-options.js';
 import {createStreamScheduler,streamOnlyMutations} from './src/chat/stream-scheduler.js';
 import {planHistoryCleanup,isProtectedHistoryImage} from './src/images/image-cleanup.js';
@@ -99,7 +100,7 @@ settings.pattern = delimiterPattern(settings.startTag,settings.endTag);
 const running=new Map();
 const cardBindings=new WeakMap();
 let chatObserver,chatRootObserver,observedChat,imageSaves=0;
-let queue=Promise.resolve(), streamActive=false, timer, autoScheduled=false, generationChat=null, settingsHost=null,imageToolsEpoch=0;
+let queue=Promise.resolve(), streamActive=false, autoScheduled=false, generationChat=null, settingsHost=null,imageToolsEpoch=0;
 let settingsPopup=null,pendingSettingsConfirm=null,autoSession=null,floatingDispose=()=>{},lastGestureReroll=0;
 const save=()=>ctx().saveSettingsDebounced();
 if(generationOptionsMigrated||connectionMigrated||generationModeMigrated)save();
@@ -287,7 +288,7 @@ function tagEditor(message,block){
         const root=document.querySelector(`#chat .mes[mesid="${ctx().chat.indexOf(live)}"] .mes_text`);
         const old=[...(root?.querySelectorAll('.miao-image-card')||[])].find(card=>card.dataset.miaoKey===`${swipe}:${blockSlot(block)}`);
         if(old){old._cancelGesture?.();old.replaceWith(makeCard(live,next.block));}
-        renderAll();generate(live,next.block);
+        renderMessages([live]);generate(live,next.block);
     };
 }
 function startGeneration(message,block,{automatic=false,egg=false}={}) {
@@ -300,13 +301,13 @@ function startGeneration(message,block,{automatic=false,egg=false}={}) {
     const storage={root:validateFolder(settings.folder),context:archiveContext(ctx())};
     if(autoSession?.chat===chat)autoSession.attempted.add(taskId);
     const task={profileId,profileName,profileSource,profile,request,blockStart:block.start,blockRaw:block.raw,status:'排队中',...generationOptions(settings),message,key,chat,messageIndex:ctx().chat.indexOf(message),name:message.name,is_user:!!message.is_user,is_system:!!message.is_system,swipe:message.swipe_id??0,prompt:promptIdentity(block.prompt),occurrence:blocks(message).filter(b=>promptIdentity(b.prompt)===promptIdentity(block.prompt)).findIndex(b=>b.start===block.start),previousRecord:state(message,key),toolsEpoch:imageToolsEpoch};
-    const waiting=running.size>0||settings.cloudQueue;running.set(taskId,task);renderAll();
+    const waiting=running.size>0||settings.cloudQueue;running.set(taskId,task);renderTask(task);
     if(waiting)notices.info('已加入生图队列','喵喵文生图');
     queue=queue.then(async()=>{
         let target=taskTarget(task);if((automatic&&!settings.enabled)||!target)return;
         if(automatic && !canAutoGenerate(ctx().chat,target.message,settings.mode,streamActive))return;
         const folder=storage.root;
-        task.status='正在生图'; renderAll();
+        task.status='正在生图'; renderTask(task);
         const data=await requestImage(request,task,()=>{const target=taskTarget(task);return !!target&&(!automatic||canAutoGenerate(ctx().chat,target.message,settings.mode,streamActive));});
         const url=await saveGeneratedImage(data,folder,`miao-${Date.now()}-${randomId()}`);
         if(rememberImage(settings.imageArchive,url,storage.context,location.href))save();
@@ -314,7 +315,7 @@ function startGeneration(message,block,{automatic=false,egg=false}={}) {
         target=taskTarget(task,true);if(!target) { notices.info('图片已保存，但原消息已删除或修改：'+url); return; }
         writeSwipeImage(target.message,task.swipe,blockSlot(target.block),appendImageVersion(task.previousRecord,{url,request,tagPrompt:block.prompt,profileId,profileName,archive:storage.context,created:Date.now()}));
         // Show the result before waiting for ST's chat-save request.
-        if(running.get(taskId)===task)running.delete(taskId);renderAll();
+        if(running.get(taskId)===task)running.delete(taskId);renderTask(task);
         if(task.previousRecord&&task.toolsEpoch===imageToolsEpoch&&(target.message.swipe_id??0)===task.swipe){
             const root=document.querySelector(`#chat .mes[mesid="${ctx().chat.indexOf(target.message)}"] .mes_text`);
             const card=[...(root?.querySelectorAll('.miao-image-card')||[])].find(n=>n.dataset.miaoKey===identity(target.message,target.block));
@@ -325,7 +326,7 @@ function startGeneration(message,block,{automatic=false,egg=false}={}) {
     }).catch(error=>{
         task.status='失败，点击重试'; task.error=String(error.message||error);
         generationError(error);
-    }).finally(()=>{if(running.get(taskId)===task)running.delete(taskId);renderAll();});
+    }).finally(()=>{if(running.get(taskId)===task)running.delete(taskId);renderTask(task);});
     task.promise=queue;return task.promise;
 }
 function selectedChatImage(message,block){
@@ -509,50 +510,80 @@ function replaceLiteral(root,literal,node,message,block) {
     }
     return true;
 }
-function renderAll() {
-    chatObserver?.disconnect();
-    try{
-    document.querySelectorAll('#chat .mes').forEach(mes=>{
-        const index=mes.getAttribute('mesid');if(index===null||!/^\d+$/.test(index))return;
-        const message=ctx().chat[Number(index)],root=mes.querySelector('.mes_text');
-        if(!message||!root)return;
-        // The host replaces .mes_text with its editor. Never insert cards into it.
-        if(mes.querySelector('textarea.edit_textarea,#curEditTextarea')){
-            mes.querySelectorAll('.miao-image-card').forEach(card=>{card._cancelGesture?.();card.remove();});return;
-        }
-        // Streaming markdown is continually rebuilt by ST. Generate in the
-        // background and insert cards only after its final message render.
-        if(streamActive&&generationChat===currentChat()&&message===latestImageMessage(ctx().chat))return;
-        const found=blocks(message),existing=[...root.querySelectorAll('.miao-image-card')],used=new Set(),occurrences=new Map();
-        for(const block of found) {
-            const prompt=promptIdentity(block.prompt),occurrence=occurrences.get(prompt)||0;occurrences.set(prompt,occurrence+1);
-            const view=cardView(message,block,found,occurrence);
-            const candidates=existing.filter(n=>!used.has(n)&&(n.dataset.miaoPrompt??n.dataset.miaoKey?.replace(/^\d+:(?:body:)?\d+:/,''))===prompt);
-            const old=candidates.find(n=>n.dataset.miaoOccurrence===String(occurrence))||existing.find(n=>!used.has(n)&&n.dataset.miaoKey===view.key)||candidates[0];
-            if(old){
-                used.add(old);
-                const bound=cardBindings.get(old),controls=[...old.querySelectorAll('img,button')];
-                const boundHere=bound?.message===message&&bound.controls.length===controls.length&&bound.controls.every(n=>old.contains(n));
-                const image=old.querySelector('img'),progress=old.querySelector('.miao-image-progress');
-                const expectedImage=!!(view.current?.url&&!view.current.deleted);
-                if(boundHere&&bound.signature===view.signature&&bound.task===view.task&&!!image===expectedImage&&!!progress===!!view.task){
-                    old.dataset.theme=resolvedTheme();
-                    if(progress&&progress.textContent!==view.task.status)progress.textContent=view.task.status;
-                    old.dataset.status=view.status;
-                    // This bind is a no-op for an unchanged source/format, and can
-                    // recover a previously failed JPG conversion without new DOM.
-                    if(image)bindImage(image,view.current.url,{lazy:true});
-                    continue;
-                }
-                const card=makeCard(message,block,found,view);
-                if(image&&!old.querySelector('.miao-image-tools')?.hidden&&card.querySelector('img'))card.querySelector('.miao-image-tools').hidden=false;
-                old._cancelGesture?.();old.replaceWith(card);
-            }else replaceLiteral(root,block.raw,makeCard(message,block,found,view),message,block);
-        }
-        for(const old of existing)if(!used.has(old)){old._cancelGesture?.();old.remove();}
-    });
-    }finally{observeChat();}
+function renderMessageElement(mes){
+    const index=mes.getAttribute('mesid');if(index===null||!/^\d+$/.test(index))return;
+    const message=ctx().chat[Number(index)],root=mes.querySelector('.mes_text');
+    if(!message||!root)return;
+    // The host replaces .mes_text with its editor. Never insert cards into it.
+    if(mes.querySelector('textarea.edit_textarea,#curEditTextarea')){
+        mes.querySelectorAll('.miao-image-card').forEach(card=>{card._cancelGesture?.();card.remove();});return;
+    }
+    // Streaming markdown is continually rebuilt by ST. Generate in the
+    // background and insert cards only after its final message render.
+    if(streamActive&&generationChat===currentChat()&&message===latestImageMessage(ctx().chat))return;
+    const found=blocks(message),existing=[...root.querySelectorAll('.miao-image-card')],used=new Set(),occurrences=new Map();
+    for(const block of found) {
+        const prompt=promptIdentity(block.prompt),occurrence=occurrences.get(prompt)||0;occurrences.set(prompt,occurrence+1);
+        const view=cardView(message,block,found,occurrence);
+        const candidates=existing.filter(n=>!used.has(n)&&(n.dataset.miaoPrompt??n.dataset.miaoKey?.replace(/^\d+:(?:body:)?\d+:/,''))===prompt);
+        const old=candidates.find(n=>n.dataset.miaoOccurrence===String(occurrence))||existing.find(n=>!used.has(n)&&n.dataset.miaoKey===view.key)||candidates[0];
+        if(old){
+            used.add(old);
+            const bound=cardBindings.get(old),controls=[...old.querySelectorAll('img,button')];
+            const boundHere=bound?.message===message&&bound.controls.length===controls.length&&bound.controls.every(n=>old.contains(n));
+            const image=old.querySelector('img'),progress=old.querySelector('.miao-image-progress');
+            const expectedImage=!!(view.current?.url&&!view.current.deleted);
+            if(boundHere&&bound.signature===view.signature&&bound.task===view.task&&!!image===expectedImage&&!!progress===!!view.task){
+                old.dataset.theme=resolvedTheme();
+                if(progress&&progress.textContent!==view.task.status)progress.textContent=view.task.status;
+                old.dataset.status=view.status;
+                // This bind is a no-op for an unchanged source/format, and can
+                // recover a previously failed JPG conversion without new DOM.
+                if(image)bindImage(image,view.current.url,{lazy:true});
+                continue;
+            }
+            const card=makeCard(message,block,found,view);
+            if(image&&!old.querySelector('.miao-image-tools')?.hidden&&card.querySelector('img'))card.querySelector('.miao-image-tools').hidden=false;
+            old._cancelGesture?.();old.replaceWith(card);
+        }else replaceLiteral(root,block.raw,makeCard(message,block,found,view),message,block);
+    }
+    for(const old of existing)if(!used.has(old)){old._cancelGesture?.();old.remove();}
 }
+function withChatObserverPaused(run){
+    // disconnect() discards pending records; route real host mutations first.
+    const pending=chatObserver?.takeRecords()||[];if(pending.length)handleChatMutations(pending);
+    chatObserver?.disconnect();
+    try{run();}finally{observeChat();}
+}
+function renderMessages(messages){
+    const chat=ctx().chat;
+    withChatObserverPaused(()=>{for(const message of new Set(messages)){
+        const index=chat.indexOf(message);if(index<0)continue;
+        const mes=document.querySelector(`#chat .mes[mesid="${index}"]`);if(mes)renderMessageElement(mes);
+    }});
+}
+function renderAll(){
+    withChatObserverPaused(()=>document.querySelectorAll('#chat .mes').forEach(renderMessageElement));
+}
+function renderTask(task){
+    if(!task?.message)return;
+    const message=liveMessage(task.message,task);if(message)renderMessages([message]);
+}
+function handleChatMutations(records){
+    const chat=ctx().chat,streaming=streamActive&&generationChat===currentChat()&&latestImageMessage(chat);
+    const streamFloor=streaming?document.querySelector(`#chat .mes[mesid="${chat.length-1}"]`):null;
+    for(const record of records){
+        if(streamOnlyMutations([record],streamFloor))continue;
+        const target=record.target.nodeType===3?record.target.parentElement:record.target;
+        if(target?.closest?.('.miao-image-card'))continue;
+        if(record.type==='attributes'&&record.attributeName==='mesid'){scheduleRender(false);continue;}
+        const floor=target?.closest?.('.mes');
+        if(floor&&observedChat?.contains(floor)){scheduleRender(false,floor.getAttribute('mesid'));continue;}
+        // Inserts/removals of message containers can shift several mesids.
+        if(record.type==='childList'&&[...record.addedNodes,...record.removedNodes].some(node=>node.nodeType===1&&(node.matches('.mes')||node.querySelector('.mes'))))scheduleRender(false);
+    }
+}
+
 function observeChat(){
     // Some hosts replace #chat or mount it after extensions have initialized.
     if(!chatRootObserver){
@@ -563,11 +594,7 @@ function observeChat(){
         chatRootObserver.observe(document.body,{childList:true,subtree:true});
     }
     const root=document.getElementById('chat');if(!root)return;
-    if(!chatObserver)chatObserver=new MutationObserver(records=>{
-        const message=streamActive&&generationChat===currentChat()?latestImageMessage(ctx().chat):null;
-        const floor=message?document.querySelector(`#chat .mes[mesid="${ctx().chat.indexOf(message)}"]`):null;
-        if(!streamOnlyMutations(records,floor))scheduleRender(false);
-    });
+    if(!chatObserver)chatObserver=new MutationObserver(handleChatMutations);
     observedChat=root;chatObserver.observe(observedChat,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['src','mesid']});
 }
 async function installWorld(file,{targetName,activate=true,existing,preserveMacros=false}={}) {
@@ -822,7 +849,7 @@ async function requestImage(request,task,canContinue) {
     const timeoutMs=generationTimeoutSeconds(scope.generationTimeoutSeconds)*1000;
     request=structuredClone(request);
     const valid=()=>{assertKey();return canContinue?.()??true;};
-    const onStatus=status=>{if(task){task.status=status;task.onStatus?.(status);renderAll();}};
+    const onStatus=status=>{if(task){task.status=status;task.onStatus?.(status);renderTask(task);}};
     const directRoute=usesDirectGeneration(scope,isTT(),request.vibes);
     const run=async()=>{
         onStatus('准备中');
@@ -1085,10 +1112,18 @@ function scanStream() {
     return autoLatest();
 }
 const streamScanner=createStreamScheduler(scanStream,{onError:generationError});
-function scheduleRender(automatic=false) {
+const chatRenderer=createRenderScheduler({
+    getScope:()=>({key:currentChat(),chat:ctx().chat}),
+    render:messages=>{const auto=autoScheduled;autoScheduled=false;if(messages===null)renderAll();else renderMessages(messages);if(auto)void autoLatest();},
+    onError:generationError,
+});
+function scheduleRender(automatic=false,target) {
     autoScheduled ||= automatic;
-    clearTimeout(timer);timer=setTimeout(()=>guard(()=>{const auto=autoScheduled;autoScheduled=false;renderAll();if(auto)autoLatest();})(),80);
+    const id=typeof target==='number'||typeof target==='string'&&/^\d+$/.test(target)?Number(target):-1;
+    const message=target&&typeof target==='object'?target:Number.isInteger(id)&&id>=0?ctx().chat[id]:null;
+    chatRenderer.schedule(message);
 }
+
 async function init() {
     mountMenu();refreshFloating();const c=ctx();save();
     if(c.eventTypes.WORLDINFO_UPDATED)c.eventSource.on(c.eventTypes.WORLDINFO_UPDATED,()=>eggMarkerCache.invalidate());
@@ -1105,14 +1140,14 @@ async function init() {
         // Final rendering and swipe navigation must release any stale stream lock.
         if(name==='MESSAGE_SWIPED'||name==='CHARACTER_MESSAGE_RENDERED'&&Number(messageId)===ctx().chat.length-1){streamScanner.cancel();streamActive=false;generationChat=null;}
         if(name==='CHARACTER_MESSAGE_RENDERED'&&Number(messageId)===ctx().chat.length-1){const session=autoSession;void autoLatest().finally(()=>{if(autoSession===session&&!generationChat)autoSession=null;});}
-        scheduleRender(false);
+        scheduleRender(false,['CHAT_LOADED','MORE_MESSAGES_LOADED'].includes(name)?undefined:messageId);
     });
     if(c.eventTypes.MESSAGE_SWIPE_DELETED)c.eventSource.on(c.eventTypes.MESSAGE_SWIPE_DELETED,async({messageId,swipeId})=>{
         const message=ctx().chat[messageId];if(!message)return;
         for(const task of running.values())if(liveMessage(task.message,task)===message&&task.swipe>=swipeId)task.cancelled=true;
-        removeSwipeImages(message,swipeId);await ctx().saveChat();scheduleRender(false);
+        removeSwipeImages(message,swipeId);await ctx().saveChat();scheduleRender(false,message);
     });
-    c.eventSource.on(c.eventTypes.CHAT_CHANGED,()=>{streamScanner.cancel();streamActive=false;generationChat=null;autoSession=null;scheduleRender(false);setTimeout(()=>guard(indexChatImages)(),0);});
+    c.eventSource.on(c.eventTypes.CHAT_CHANGED,()=>{streamScanner.cancel();chatRenderer.cancel();autoScheduled=false;streamActive=false;generationChat=null;autoSession=null;scheduleRender(false);setTimeout(()=>guard(indexChatImages)(),0);});
     for(const name of ['CHAT_LOADED','MORE_MESSAGES_LOADED'])if(c.eventTypes[name])c.eventSource.on(c.eventTypes[name],()=>setTimeout(()=>guard(indexChatImages)(),0));
     c.eventSource.on(c.eventTypes.GENERATION_STARTED,(type,options,dryRun)=>{
         // Quiet prompts and prompt previews do not render a chat reply and may
@@ -1122,8 +1157,8 @@ async function init() {
         if(!settings.enabled||settings.mode==='manual'){autoSession=null;return;}
         autoSession={chat:currentChat(),enabled:settings.enabled&&settings.mode!=='manual',attempted:new Set(),marker:settings.eggProfileEnabled?eggMarkerCache.read():Promise.resolve(''),existing:new Set(ctx().chat.flatMap((m,i)=>blocks(m).map(b=>`${i}:${identity(m,b)}`)))};
     });
-    c.eventSource.on(c.eventTypes.GENERATION_ENDED,()=>{const same=generationChat===currentChat();streamScanner.cancel();streamActive=false;generationChat=null;renderAll();if(same)autoLatest();});
-    if(c.eventTypes.GENERATION_STOPPED)c.eventSource.on(c.eventTypes.GENERATION_STOPPED,()=>{const same=generationChat===currentChat();streamScanner.cancel();streamActive=false;generationChat=null;scheduleRender(false);if(same&&(settings.mode==='stream'||settings.eggProfileEnabled))void autoLatest();});
+    c.eventSource.on(c.eventTypes.GENERATION_ENDED,()=>{const same=generationChat===currentChat();streamScanner.cancel();streamActive=false;generationChat=null;scheduleRender(false,latestImageMessage(ctx().chat));if(same)autoLatest();});
+    if(c.eventTypes.GENERATION_STOPPED)c.eventSource.on(c.eventTypes.GENERATION_STOPPED,()=>{const same=generationChat===currentChat();streamScanner.cancel();streamActive=false;generationChat=null;scheduleRender(false,latestImageMessage(ctx().chat));if(same&&(settings.mode==='stream'||settings.eggProfileEnabled))void autoLatest();});
     c.eventSource.on(c.eventTypes.STREAM_TOKEN_RECEIVED,()=>{
         if(generationChat!==currentChat())return;
         streamActive=true;
