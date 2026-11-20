@@ -62,3 +62,20 @@ test('thumbnail decoder remains exported and preserves every byte and data URL i
     const bytes=Uint8Array.from({length:65537},(_,i)=>i%256),encoded=Buffer.from(bytes).toString('base64');
     for(const input of [encoded,'data:image/png;base64,'+encoded]){const blob=imageBlob(input);assert.equal(blob.type,'image/png');assert.deepEqual(new Uint8Array(await blob.arrayBuffer()),bytes);}
 });
+
+test('generation start skips history and macros in manual/disabled modes while preserving stream lifecycle',()=>{
+    const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
+    const start=source.indexOf('    c.eventSource.on(c.eventTypes.GENERATION_STARTED,');
+    const end=source.indexOf('\n    });',start)+7;
+    assert.ok(start>=0&&end>start);
+    for(const mode of ['manual','auto','stream'])for(const enabled of [false,true]){
+        let callback,parsed=0,macros=0,cancels=0;
+        const context={c:{eventTypes:{GENERATION_STARTED:'start'},eventSource:{on:(_,fn)=>callback=fn}},settings:{mode,enabled,eggProfileEnabled:true},streamScanner:{cancel(){cancels++;}},streamActive:true,generationChat:null,autoSession:{old:true},currentChat:()=> 'chat',ctx:()=>({chat:[{mes:'fixture'}]}),blocks(){parsed++;return [{prompt:'fixture'}];},identity:()=> 'identity',eggMarkerCache:{read(){macros++;return Promise.resolve('marker');}}};
+        vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+        callback('normal',{},false);
+        const automatic=enabled&&mode!=='manual';
+        assert.equal(parsed,automatic?1:0);assert.equal(macros,automatic?1:0);assert.equal(cancels,1);
+        assert.equal(context.streamActive,false);assert.equal(context.generationChat,'chat');
+        assert.equal(context.autoSession===null,!automatic);
+    }
+});

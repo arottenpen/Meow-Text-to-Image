@@ -1105,6 +1105,7 @@ async function init() {
         // never emit GENERATION_ENDED. They must not hide the last floor's cards.
         if(dryRun||type==='quiet'||type==='impersonate')return;
         streamScanner.cancel();streamActive=false;generationChat=currentChat();
+        if(!settings.enabled||settings.mode==='manual'){autoSession=null;return;}
         autoSession={chat:currentChat(),enabled:settings.enabled&&settings.mode!=='manual',attempted:new Set(),marker:settings.eggProfileEnabled?eggMarkerCache.read():Promise.resolve(''),existing:new Set(ctx().chat.flatMap((m,i)=>blocks(m).map(b=>`${i}:${identity(m,b)}`)))};
     });
     c.eventSource.on(c.eventTypes.GENERATION_ENDED,()=>{const same=generationChat===currentChat();streamScanner.cancel();streamActive=false;generationChat=null;renderAll();if(same)autoLatest();});
