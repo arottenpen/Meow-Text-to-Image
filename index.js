@@ -352,17 +352,23 @@ async function openChatImage(message,block,url){
         try{const latest=resolve(item),image=selectedChatImage(latest.message,latest.block);if(image?.url&&!image.deleted)item.url=image.url;}catch{}
     }});
 }
-function makeCard(message,block,parsedBlocks=blocks(message)) {
-    const key=identity(message,block), card=el('div',undefined,'miao-image-card');
+function cardView(message,block,parsedBlocks,occurrence){
+    const key=identity(message,block),prompt=promptIdentity(block.prompt);
+    occurrence??=parsedBlocks.filter(b=>promptIdentity(b.prompt)===prompt).findIndex(b=>b.start===block.start);
+    const record=state(message,key,parsedBlocks),task=taskFor(message,block);
+    const versions=imageVersions(record),wanted=Math.min(record?.selected??versions.length-1,versions.length-1),selected=versions[wanted]?.deleted?versions.findLastIndex(v=>!v.deleted):wanted,current=versions[selected];
+    // Include data captured by button handlers, not only what is visibly painted.
+    const signature=JSON.stringify([key,block.start,block.raw,occurrence,selected,versions.map(v=>[v.url,!!v.deleted]),current?.request,current?.tagPrompt,current?.profileName,settings.rerollClicks===3?3:2,favoritesEnabled(settings),settings.exportFormat]);
+    const status=String(selected)+':'+versions.map(v=>v.url+':'+!!v.deleted).join('|')+':'+(task?.status||'')+':'+(settings.rerollClicks===3?3:2)+':favorites='+favoritesEnabled(settings);
+    return {key,prompt,occurrence,record,task,versions,selected,current,signature,status};
+}
+function makeCard(message,block,parsedBlocks=blocks(message),view=cardView(message,block,parsedBlocks)) {
+    const {key,occurrence,record,task,versions,selected,current}=view,card=el('div',undefined,'miao-image-card');
     card.dataset.theme=resolvedTheme();
     card.dataset.miaoKey=key;
-    card.dataset.miaoPrompt=promptIdentity(block.prompt);
+    card.dataset.miaoPrompt=view.prompt;
     card.dataset.miaoBodyIndex=String(block.bodyIndex);
-    const occurrence=block.occurrence??parsedBlocks.filter(b=>promptIdentity(b.prompt)===promptIdentity(block.prompt)).findIndex(b=>b.start===block.start);
     card.dataset.miaoOccurrence=String(occurrence);
-    const record=state(message,key,parsedBlocks);
-    const task=taskFor(message,block);
-    const versions=imageVersions(record),wanted=Math.min(record?.selected??versions.length-1,versions.length-1),selected=versions[wanted]?.deleted?versions.findLastIndex(v=>!v.deleted):wanted,current=versions[selected];
     const actions=el('div',undefined,'miao-image-tools');actions.hidden=true;
     const button=(label,fn,parent=actions)=>{const b=el('button',label,'miao-button');b.type='button';if(label==='删除')bindButtonPress(b,()=>guard(fn)());else b.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();guard(fn)();});parent.append(b);return b;};
     if(current?.url&&!current.deleted){
@@ -422,9 +428,9 @@ function makeCard(message,block,parsedBlocks=blocks(message)) {
         });
     }
     if(task){const progress=el('span',task.status,'miao-image-progress');progress.setAttribute('role','status');card.append(progress);}
-    card.dataset.status=String(selected)+':'+versions.map(v=>v.url+':'+!!v.deleted).join('|')+':'+(task?.status||'')+':'+(settings.rerollClicks===3?3:2)+':favorites='+favoritesEnabled(settings);
+    card.dataset.status=view.status;
     card.append(actions);
-    cardBindings.set(card,{message,controls:[...card.querySelectorAll('img,button')]});
+    cardBindings.set(card,{message,signature:view.signature,task,controls:[...card.querySelectorAll('img,button')]});
     return card;
 }
 function collectVisibleText(root) {
@@ -517,25 +523,33 @@ function renderAll() {
         // Streaming markdown is continually rebuilt by ST. Generate in the
         // background and insert cards only after its final message render.
         if(streamActive&&generationChat===currentChat()&&message===latestImageMessage(ctx().chat))return;
-        const found=blocks(message),existing=[...root.querySelectorAll('.miao-image-card')],used=new Set();
+        const found=blocks(message),existing=[...root.querySelectorAll('.miao-image-card')],used=new Set(),occurrences=new Map();
         for(const block of found) {
-            const card=makeCard(message,block,found);
-            const candidates=existing.filter(n=>!used.has(n)&&(n.dataset.miaoPrompt??n.dataset.miaoKey?.replace(/^\d+:(?:body:)?\d+:/,''))===card.dataset.miaoPrompt);
-            const old=candidates.find(n=>n.dataset.miaoOccurrence===card.dataset.miaoOccurrence)||existing.find(n=>!used.has(n)&&n.dataset.miaoKey===card.dataset.miaoKey)||candidates[0];
-            if(old) {
+            const prompt=promptIdentity(block.prompt),occurrence=occurrences.get(prompt)||0;occurrences.set(prompt,occurrence+1);
+            const view=cardView(message,block,found,occurrence);
+            const candidates=existing.filter(n=>!used.has(n)&&(n.dataset.miaoPrompt??n.dataset.miaoKey?.replace(/^\d+:(?:body:)?\d+:/,''))===prompt);
+            const old=candidates.find(n=>n.dataset.miaoOccurrence===String(occurrence))||existing.find(n=>!used.has(n)&&n.dataset.miaoKey===view.key)||candidates[0];
+            if(old){
                 used.add(old);
-                old.dataset.theme=card.dataset.theme;
                 const bound=cardBindings.get(old),controls=[...old.querySelectorAll('img,button')];
                 const boundHere=bound?.message===message&&bound.controls.length===controls.length&&bound.controls.every(n=>old.contains(n));
-                const sameImage=old.querySelector('img')?.getAttribute('src')===card.querySelector('img')?.getAttribute('src');
-                const sameVersion=old.querySelector('.miao-version-count')?.textContent===card.querySelector('.miao-version-count')?.textContent;
-                if(old.dataset.status!==card.dataset.status||old.dataset.miaoKey!==card.dataset.miaoKey||!boundHere||!sameImage||!sameVersion){
-                    if(old.querySelector('img')&&!old.querySelector('.miao-image-tools')?.hidden&&card.querySelector('img'))card.querySelector('.miao-image-tools').hidden=false;
-                    old.replaceWith(card);
+                const image=old.querySelector('img'),progress=old.querySelector('.miao-image-progress');
+                const expectedImage=!!(view.current?.url&&!view.current.deleted);
+                if(boundHere&&bound.signature===view.signature&&bound.task===view.task&&!!image===expectedImage&&!!progress===!!view.task){
+                    old.dataset.theme=resolvedTheme();
+                    if(progress&&progress.textContent!==view.task.status)progress.textContent=view.task.status;
+                    old.dataset.status=view.status;
+                    // This bind is a no-op for an unchanged source/format, and can
+                    // recover a previously failed JPG conversion without new DOM.
+                    if(image)bindImage(image,view.current.url,{lazy:true});
+                    continue;
                 }
-            } else replaceLiteral(root,block.raw,card,message,block);
+                const card=makeCard(message,block,found,view);
+                if(image&&!old.querySelector('.miao-image-tools')?.hidden&&card.querySelector('img'))card.querySelector('.miao-image-tools').hidden=false;
+                old._cancelGesture?.();old.replaceWith(card);
+            }else replaceLiteral(root,block.raw,makeCard(message,block,found,view),message,block);
         }
-        for(const old of existing)if(!used.has(old))old.remove();
+        for(const old of existing)if(!used.has(old)){old._cancelGesture?.();old.remove();}
     });
     }finally{observeChat();}
 }
