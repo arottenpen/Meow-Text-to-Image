@@ -24,7 +24,10 @@ test('conversion failure never falls back to exposing the original PNG in JPG mo
  while(!errors.length)await tick();assert.equal(element.src,undefined);assert.equal(element.dataset.miaoExportState,'error');assert.match(element.alt,/转换失败/);assert.equal(f.writes.length,0);
 });
 test('cached JPEGs survive a new presentation instance and concurrent conversions share work and stay bounded',async()=>{
- let converting=0,peak=0;const f=fixture({convert:async()=>{converting++;peak=Math.max(peak,converting);await tick();converting--;return {blob:jpg};}});
+ // Hold the first conversion until the second arrives; crypto completion
+ // timing must not determine whether this fixture exercises both slots.
+ let release;const gate=new Promise(resolve=>release=resolve);
+ let converting=0,peak=0;const f=fixture({convert:async()=>{converting++;peak=Math.max(peak,converting);if(converting===2)release();await gate;await tick();converting--;return {blob:jpg};}});
  for(let i=0;i<6;i++)f.files.set(`/image-${i}.png`,png);
  const results=await Promise.all([...Array.from({length:6},(_,i)=>f.presentation.jpeg(`/image-${i}.png`)),f.presentation.jpeg('/image-0.png')]);assert.equal(peak,2);assert.equal(f.writes.length,6);assert.equal(f.reads.filter(url=>url==='/image-0.png').length,1);
  // Promise.all preserves input order; concurrent writes may finish in any order.

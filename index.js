@@ -569,7 +569,7 @@ function renderAll(){
     withChatObserverPaused(()=>document.querySelectorAll('#chat .mes').forEach(renderMessageElement));
 }
 function renderTask(task){
-    if(!task?.message)return;
+    if(!task?.message||task.chat!==currentChat())return;
     const message=liveMessage(task.message,task);if(message)renderMessages([message]);
 }
 function handleChatMutations(records){

@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRenderScheduler} from '../src/chat/render-scheduler.js';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+test('task progress from another chat never resolves or renders a current message',()=>{
+    const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
+    const body=source.slice(source.indexOf('function renderTask('),source.indexOf('\nfunction handleChatMutations('));
+    const message={};let resolved=0,rendered=0;
+    const context={currentChat:()=> 'current',liveMessage:()=>{resolved++;return message;},renderMessages:()=>{rendered++;}};
+    vm.createContext(context);vm.runInContext(body,context);
+    context.renderTask({chat:'old',message});assert.equal(resolved,0);assert.equal(rendered,0);
+    context.renderTask({chat:'current',message});assert.equal(resolved,1);assert.equal(rendered,1);
+});
 function fixture(){
     const a={},b={},c={},scope={key:'one',chat:[a,b,c]},calls=[],timers=new Map();let id=0;
     const scheduler=createRenderScheduler({getScope:()=>scope,render:targets=>calls.push(targets),setTimer:fn=>{timers.set(++id,fn);return id;},clearTimer:id=>timers.delete(id)});
