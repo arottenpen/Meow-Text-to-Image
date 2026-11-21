@@ -67,7 +67,7 @@ test('generated original returns before thumbnail work, queues only URL, and rep
 function savedChatFixture({image={dataset:{miaoOriginalUrl:url(0)}},ready=new Promise(()=>{})}={}){
  const source=readFileSync(new URL('../index.js',import.meta.url),'utf8'),body=source.slice(source.indexOf('async function saveGeneratedImage('),source.indexOf('\nconst resourceUpdater='));
  const calls=[],timers=new Map();let sequence=0;
- const context={inStage:(_name,run)=>run(),saveBase64AsFile:async()=>url(0),document:{querySelectorAll:()=>image?[image]:[]},imagePresentation:{whenReady:()=>ready},
+ const context={inStage:(_name,run)=>run(),saveBase64AsFile:async()=>url(0),document:{querySelectorAll:()=>image?[image]:[]},imagePresentation:{prepareGenerated:async()=>{},activate(element){element.loading='eager';element.fetchPriority='high';},whenReady:()=>ready},
   thumbnails:{ensure:async(...args)=>calls.push(args)},notices:{warning:()=>{}},setTimeout(fn,ms){const id=++sequence;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}};
  vm.createContext(context);vm.runInContext(body,context);
  return {context,calls,image,timers,fire(ms){const entry=[...timers].find(([,value])=>value.ms===ms);assert.ok(entry,'expected scheduled timer');timers.delete(entry[0]);entry[1].fn();}};

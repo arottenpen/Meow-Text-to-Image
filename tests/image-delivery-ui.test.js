@@ -5,13 +5,13 @@ import {createRequire} from 'node:module';
 import {homedir} from 'node:os';
 const require=createRequire(import.meta.url);
 
-test('completed chat images load before slow queue finish and chat-save acknowledgements on ST and TT',{timeout:90000},async()=>{
+test('completed chat images load before slow queue finish and chat-save acknowledgements on ST and TT',{timeout:120000},async()=>{
  const {chromium}=require(process.env.MIAO_PLAYWRIGHT_MODULE||`${homedir()}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright`);
  const server=spawn(process.execPath,['tests/preview-server.mjs'],{env:{...process.env,MIAO_PREVIEW_PORT:'0'},stdio:['ignore','pipe','pipe']});let browser;
  try{
   const url=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('预览启动超时')),10000);server.stdout.on('data',data=>{const match=String(data).match(/http:\/\/[^\s]+/);if(match){clearTimeout(timer);resolve(match[0]);}});server.on('exit',()=>{clearTimeout(timer);reject(Error('预览启动失败'));});});
   browser=await chromium.launch({channel:process.env.MIAO_BROWSER_CHANNEL||'chrome',headless:true});
-  for(const tt of [false,true])for(const format of ['png','jpg']){
+  for(const tt of [false,true])for(const format of ['png','jpg'])for(const stalledDecode of [false,true]){
    const page=await browser.newPage({viewport:{width:390,height:844},isMobile:true});page.setDefaultTimeout(7000);const errors=[];page.on('pageerror',error=>errors.push(error.message));
    try{
     await page.goto(url+'/?settings-smoke&manual-delete&samples-archives'+(tt?'&tt':''));await page.locator('#miao-nai-menu').waitFor();
@@ -27,6 +27,7 @@ test('completed chat images load before slow queue finish and chat-save acknowle
      // Hold acknowledgement delivery after the real queue RPC, so a timed-out
      // fetch cannot leave this fixture waiting for an already-aborted request.
      const queueFinishGate=new Promise(resolve=>p.releaseQueueFinish=resolve),fetchQueue=window.fetch;
+     p.imageSaveGate=new Promise(resolve=>p.releaseImageSave=resolve);p.generatedSourceReads=0;
      p.chatDecodeGate=new Promise(resolve=>p.releaseChatDecode=resolve);
       const nativeDecode=HTMLImageElement.prototype.decode;
       HTMLImageElement.prototype.decode=async function(){
@@ -34,7 +35,9 @@ test('completed chat images load before slow queue finish and chat-save acknowle
        return nativeDecode.call(this);
       };
       p.slowSave=true;window.fetch=async(url,options)=>{
-      if(String(url)==='https://queue.test/finish'){
+       if(String(url)==='/fixture-image-save'&&JSON.parse(options.body).folder===p.settings.folder){p.imageSaveStarted=true;await p.imageSaveGate;}
+       if((p.imageWrites||[]).some(item=>item.folder===p.settings.folder&&String(url)==='/user/images/'+item.folder+'/'+item.name))p.generatedSourceReads++;
+       if(String(url)==='https://queue.test/finish'){
        p.finishBody=JSON.parse(options.body);p.finishStarted=true;
        const response=await fetchQueue(url,options);p.finishResponseReceived=response.ok;
        await queueFinishGate;p.finishAcknowledged=true;return response;
@@ -45,6 +48,9 @@ test('completed chat images load before slow queue finish and chat-save acknowle
     },format);
     await page.locator('.miao-image-card').getByRole('button',{name:'生成插图',exact:true}).click();
     await page.waitForFunction(()=>!!window.preview.finishStarted);
+    await page.waitForFunction(()=>!!window.preview.imageSaveStarted);
+    assert.equal(await page.locator('.miao-image-progress').textContent(),'已生成，保存图片中');
+    await page.evaluate(()=>window.preview.releaseImageSave());
     await page.waitForFunction(()=>window.preview.chatDecodeStarted===true);
     const loading=await page.evaluate(()=>{
      const image=document.querySelector('.miao-image-card>img');
@@ -52,8 +58,12 @@ test('completed chat images load before slow queue finish and chat-save acknowle
     });
     assert.equal(loading.complete,true);assert.ok(loading.width>0);assert.equal(loading.state,'loading');assert.equal(loading.visibility,'hidden');
     assert.equal(loading.loading,'eager');assert.equal(loading.priority,'high');assert.equal(loading.thumbnailWrites,0,'thumbnail work must yield to foreground decoding');
-    await page.evaluate(()=>window.preview.releaseChatDecode());
+    assert.equal(await page.locator('.miao-image-load-status').textContent(),'解码图片中');
+    assert.equal(await page.evaluate(()=>window.preview.generatedSourceReads),0,'fresh display must not fetch its PNG again before decoding');
+    if(!stalledDecode)await page.evaluate(()=>window.preview.releaseChatDecode());
     await page.waitForFunction(()=>{const image=document.querySelector('.miao-image-card>img');return image?.complete&&image.naturalWidth>0&&image.dataset.miaoLoadState==='ready'&&getComputedStyle(image).visibility==='visible';});
+    assert.equal(await page.locator('.miao-image-load-status').isVisible(),false);
+    if(stalledDecode)assert.equal(await page.locator('.miao-image-card>img').getAttribute('data-miao-decode-fallback'),'true');
     await page.waitForFunction(()=>(window.preview.imageWrites||[]).some(item=>item.folder==='miao-nai-thumbnails'));
     const result=await page.evaluate(()=>{
      const p=window.preview,image=document.querySelector('.miao-image-card>img'),record=p.chat[0].miao_nai_image_swipes[0]['body:0:delivery scene'];
@@ -69,7 +79,7 @@ test('completed chat images load before slow queue finish and chat-save acknowle
     await page.waitForFunction(()=>window.preview.finishAcknowledged===true);
     assert.equal(await page.evaluate(()=>window.preview.calls.length),1);assert.deepEqual(errors,[]);
    }finally{
-    await page.evaluate(()=>{window.preview?.releaseChatDecode?.();window.preview?.releaseQueueFinish?.();window.preview?.releaseSave?.();}).catch(()=>{});await page.close();
+    await page.evaluate(()=>{window.preview?.releaseImageSave?.();window.preview?.releaseChatDecode?.();window.preview?.releaseQueueFinish?.();window.preview?.releaseSave?.();}).catch(()=>{});await page.close();
    }
   }
  }finally{await browser?.close();server.kill();}
