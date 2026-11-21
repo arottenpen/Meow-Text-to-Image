@@ -53,7 +53,7 @@ test('panel lifecycle listeners flush drafts and detach pagehide handling when c
     const add=win.addEventListener.bind(win),remove=win.removeEventListener.bind(win);
     win.addEventListener=(name,fn)=>{if(name==='pagehide')pagehideListeners++;add(name,fn);};
     win.removeEventListener=(name,fn)=>{if(name==='pagehide')pagehideListeners--;remove(name,fn);};
-    root.ownerDocument={defaultView:win};
+    root.ownerDocument={defaultView:win};root.querySelector=()=>null;
     const context={root,saveSettings:()=>saved++,onError:e=>{throw e;},createInputSaveQueue:options=>createInputSaveQueue({...options,setTimer:fn=>{timers.set(++id,fn);return id;},clearTimer:id=>timers.delete(id)})};
     vm.createContext(context);vm.runInContext(source.slice(source.indexOf('    const inputSaves='),source.indexOf('    const versionLabel=')),context);
     const type=()=>vm.runInContext('inputSaves.input(()=>save());',context);
@@ -65,7 +65,7 @@ test('panel lifecycle listeners flush drafts and detach pagehide handling when c
 test('repeated input events do not rewrite an already dirty save indicator',()=>{
     const root=new EventTarget();let label='已保存',writes=0;
     const button={disabled:false,get textContent(){return label;},set textContent(value){label=value;writes++;}};
-    root.querySelector=()=>button;const context={root};vm.createContext(context);
+    root.querySelector=()=>button;const context={root,editRevision:0};vm.createContext(context);
     vm.runInContext(source.split('\n').find(line=>line.includes("for(const event of ['input','change'])root.addEventListener")),context);
     for(let i=0;i<100;i++)root.dispatchEvent(new Event('input'));
     assert.equal(label,'保存');assert.equal(writes,1);
@@ -77,4 +77,16 @@ test('renaming one profile only writes its own gallery labels',()=>{
     const start=source.indexOf('            const paintNames=');const end=source.indexOf('\n            for(const profile of settings.profiles)',start);
     vm.createContext(context);vm.runInContext(source.slice(start,end)+'\npaintNames(p);',context);
     assert.equal(writes,6,'only the editing heading and selected profile labels should change');
+});
+test('an explicit save consumes pending automatic work without discarding later edits',()=>{
+    const f=fixture();f.input('confirmed explicitly');f.queue.cancelPending();f.advance(2000);
+    assert.equal(f.calls.length,0);assert.equal(f.timers.size,0);
+    f.input('new edit');f.advance(300);assert.deepEqual(f.calls,['new edit']);
+    f.queue.dispose();assert.equal(f.calls.length,1);
+});
+test('input during a disabled save still advances the modification revision',()=>{
+    const root=new EventTarget(),button={disabled:true,textContent:'保存中…'},context={root,editRevision:0};
+    root.querySelector=()=>button;vm.createContext(context);
+    vm.runInContext(source.split('\n').find(line=>line.includes("for(const event of ['input','change'])root.addEventListener")),context);
+    root.dispatchEvent(new Event('input'));assert.equal(context.editRevision,1);assert.equal(button.textContent,'保存中…');
 });

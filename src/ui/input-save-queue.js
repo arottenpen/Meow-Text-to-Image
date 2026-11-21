@@ -15,6 +15,8 @@ export function createInputSaveQueue({save,onError=()=>{},delayMs=300,maxWaitMs=
         input(change){depth++;try{return change();}finally{depth--; }},
         request(){dirty=true;if(disposed||!depth)flush();else arm();},
         flush,
+        // An explicit confirmed save supersedes the pending automatic write.
+        cancelPending(){clear();dirty=false;},
         compositionStart(){composing=true;clear();},
         compositionEnd(){composing=false;arm();},
         dispose(){disposed=true;composing=false;flush();},

@@ -37,7 +37,7 @@ import * as extensionAPI from '../../../extensions.js';
 import { saveBase64AsFile } from '../../../utils.js';
 import * as hostUtils from '../../../utils.js';
 import {bindImageGesture,createFloatingEntry,bindImageZoom} from './src/ui/interactions.js';
-import {persistHostSettings} from './src/platform/settings-save.js';
+import {createSettingsPersistence} from './src/platform/settings-save.js';
 import {createPromptTranslator} from './src/prompts/translation.js';
 import {WORLD_NAME,mergeWorldEntries,mergeRegexRules,bundledWorldTargets,migrateWorldBindings} from './src/resources/resources.js';
 import { writeSecret, SECRET_KEYS } from '../../../secrets.js';
@@ -105,7 +105,7 @@ let settingsPopup=null,pendingSettingsConfirm=null,autoSession=null,floatingDisp
 const save=()=>ctx().saveSettingsDebounced();
 if(generationOptionsMigrated||connectionMigrated||generationModeMigrated)save();
 const enqueue=run=>{const job=queue.then(run);queue=job.catch(()=>{});return job;};
-const persistSettings=()=>persistHostSettings({saveNow:async()=>{const host=await import('../../../../script.js');return host.saveSettings();},source:ctx().eventSource,event:ctx().eventTypes.SETTINGS_UPDATED});
+const persistSettings=createSettingsPersistence({saveNow:async()=>{const host=await import('../../../../script.js');return host.saveSettings();},cancelPending:()=>ctx().saveSettingsDebounced.cancel?.(),source:ctx().eventSource,event:ctx().eventTypes.SETTINGS_UPDATED});
 const favorites=createFavorites({settings,persist:persistSettings});
 const thumbnails=createThumbnails({fetchImage:url=>hostFetch(url),saveImage:saveBase64AsFile,onReady:(_url,target)=>{
     for(const image of document.querySelectorAll('img[data-thumbnail-url]'))if(image.dataset.thumbnailUrl===target&&image.dataset.thumbnailState!=='ready')image.src=target;

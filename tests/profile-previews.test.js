@@ -27,7 +27,7 @@ test('queued edits and deleted profiles never receive stale results or extra gen
 test('save failures keep the generated sample visible and can be saved without charging again',async()=>{
  const p={...defaults,id:'a'},errors=[];let calls=0;
  const previews=createProfilePreviews({profiles:()=>[p],library:()=>[],enqueue:run=>Promise.resolve().then(run),generate:async()=>{calls++;return 'png';},saveImage:async()=>'/preview.png',persist:async()=>{throw Error('offline');},onError:e=>errors.push(e)});
- await previews.refresh(p);assert.equal(p.preview.url,'/preview.png');assert.match(errors[0].message,/例图已生成/);await previews.refresh(p,{ifChanged:true});assert.equal(calls,1);
+ await previews.refresh(p);assert.equal(p.preview.url,'/preview.png');assert.match(errors[0].message,/例图已生成/);assert.equal(previews.state(p).status,'例图未保存');await previews.refresh(p,{ifChanged:true});assert.equal(calls,1);
 });
 
 test('custom ordering persists and keeps the selected config, previews and parameters attached to their IDs',()=>{
@@ -49,4 +49,26 @@ test('bulk removal preserves survivor previews and selection, and chooses the ne
  const plan=planProfileRemoval(settings,['a','d']);assert.deepEqual(plan.profiles.map(p=>p.id),['b','c']);assert.equal(plan.profiles[plan.active],profiles[2]);assert.equal(plan.profiles[0].preview.url,'/b.png');assert.equal(JSON.stringify(settings),before);
  const next=planProfileRemoval(settings,['b','c']);assert.equal(next.profiles[next.active].id,'d');assert.equal(planProfileRemoval({...settings,active:3},['d']).profiles[2].id,'c');
  for(const ids of [[],['missing'],['a','b','c','d']])assert.throws(()=>planProfileRemoval(settings,ids));assert.equal(JSON.stringify(settings),before);
+});
+
+test('slow preview persistence releases the generation queue and deduplicates until confirmed',async()=>{
+    const p={...defaults,id:'a'};let queue=Promise.resolve(),release,started,generated=0;
+    const saving=new Promise(resolve=>started=resolve),gate=new Promise(resolve=>release=resolve);
+    const enqueue=run=>{const job=queue.then(run);queue=job.catch(()=>{});return job;};
+    const previews=createProfilePreviews({profiles:()=>[p],library:()=>[],enqueue,
+        generate:async()=>{generated++;return 'png';},saveImage:async()=>'/preview.png',persist:async()=>{started();await gate;}});
+    const first=previews.refresh(p);await saving;
+    assert.equal(previews.state(p).status,'例图已生成，保存中…');assert.equal(previews.state(p).busy,true);
+    assert.equal(previews.refresh(p),first);assert.equal(previews.refresh(p,{ifChanged:true}),first);
+    let next=false;await enqueue(async()=>{next=true;});assert.equal(next,true);assert.equal(generated,1);
+    release();await first;assert.equal(previews.state(p).busy,false);assert.equal(previews.state(p).status,'');
+});
+test('preview generation and image storage have distinct progress and failures do not persist',async()=>{
+    const p={...defaults,id:'a'},statuses=[],errors=[];let previews,writes=0;
+    previews=createProfilePreviews({profiles:()=>[p],library:()=>[],enqueue:run=>Promise.resolve().then(run),
+        generate:async()=>{statuses.push(previews.state(p).status);return 'png';},
+        saveImage:async()=>{statuses.push(previews.state(p).status);throw Error('storage offline');},
+        persist:async()=>writes++,onError:error=>errors.push(error)});
+    await previews.refresh(p);assert.deepEqual(statuses,['生成中…','保存图片…']);assert.equal(writes,0);
+    assert.equal(p.preview,undefined);assert.equal(previews.state(p).status,'生成失败');assert.equal(errors.length,1);
 });
