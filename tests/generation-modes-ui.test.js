@@ -11,14 +11,15 @@ test('manual, after-reply and stream generation avoid duplicate, historical and 
  try{
   const url=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('预览启动超时')),10000);server.stdout.on('data',data=>{const match=String(data).match(/http:\/\/[^\s]+/);if(match){clearTimeout(timer);resolve(match[0]);}});server.on('exit',()=>{clearTimeout(timer);reject(Error('预览启动失败'));});});
   browser=await chromium.launch({channel:process.env.MIAO_BROWSER_CHANNEL||'chrome',headless:true});
-  const prepare=async mode=>{
-   const page=await browser.newPage();page.setDefaultTimeout(6000);await page.goto(url+'/?settings-smoke');await page.locator('#miao-nai-menu').waitFor();
+  const prepare=async(mode,tt=false)=>{
+   const page=await browser.newPage();page.setDefaultTimeout(6000);await page.goto(url+'/?settings-smoke'+(tt?'&tt':''));await page.locator('#miao-nai-menu').waitFor();
    await page.evaluate(async mode=>{const p=window.preview;Object.assign(p.settings,{mode,cloudQueue:false,enabled:true,eggProfileEnabled:false});for(const profile of p.settings.profiles){profile.vibeEnabled=false;profile.vibes=[];}p.chat.splice(0,p.chat.length,{name:'User fixture',is_user:true,mes:'fixture user'},{name:'History fixture',mes:'image###history###'});window.drawGenerationFixture=()=>{document.getElementById('chat').innerHTML=p.chat.map((message,index)=>`<div class="mes" mesid="${index}"><div class="mes_text">${message.mes}</div></div>`).join('');};window.drawGenerationFixture();await p.emit('CHAT_CHANGED');await p.emit('CHARACTER_MESSAGE_RENDERED',1);},mode);
    await page.locator('[mesid="1"] .miao-image-card').waitFor();assert.equal(await page.evaluate(()=>window.preview.calls.length),0,'loading history must not send requests');return page;
   };
   for(const mode of ['manual','auto','stream']){
    const page=await prepare(mode);
    await page.evaluate(async()=>{const p=window.preview;await p.emit('GENERATION_STARTED','normal',{});p.chat.push({name:'Reply fixture',mes:'<think>image###ignore reasoning###'});window.drawGenerationFixture();await p.emit('STREAM_TOKEN_RECEIVED');});
+   assert.equal(await page.evaluate(()=>window.preview.context.eventSource.listenerCount('STREAM_TOKEN_RECEIVED')),mode==='stream'?1:0,mode+' token subscription');
    await page.waitForTimeout(60);assert.equal(await page.evaluate(()=>window.preview.calls.length),0);
    await page.evaluate(async()=>{const p=window.preview;p.chat.at(-1).mes+='</think>image###one###image###partial';window.drawGenerationFixture();await p.emit('STREAM_TOKEN_RECEIVED');await p.emit('STREAM_TOKEN_RECEIVED');});
    if(mode==='stream')await page.waitForFunction(()=>window.preview.calls.length===1);
@@ -45,6 +46,19 @@ test('manual, after-reply and stream generation avoid duplicate, historical and 
    await automatic.waitForFunction(()=>!!window.preview.chat.at(-1).miao_nai_image_swipes?.[0]?.['body:0:reused scene']);
   }
   await automatic.close();
+  // Changing modes through either host UI must attach once and detach immediately.
+  for(const tt of [false,true]){
+   const toggled=await prepare('manual',tt);
+   await toggled.locator('#miao-nai-menu').click();
+   await toggled.locator('.miao-overview').getByRole('button',{name:'生成',exact:true}).click();
+   const selector=toggled.getByRole('combobox',{name:/^生成模式/});
+   for(const mode of ['stream','stream','manual','auto','stream','manual']){
+    await selector.selectOption(mode);
+    assert.equal(await toggled.evaluate(()=>window.preview.context.eventSource.listenerCount('STREAM_TOKEN_RECEIVED')),mode==='stream'?1:0,(tt?'TT ':'ST ')+mode+' token subscription');
+   }
+   assert.equal(await toggled.evaluate(()=>window.preview.calls.length),0,'changing modes never generates historical tags');
+   await toggled.close();
+  }
   // Deleting a message while its image is in flight cannot retarget that image.
   const manual=await prepare('manual');
   await manual.evaluate(async()=>{const p=window.preview;p.chat[1].mes='image###same scene###';p.holdImage=true;window.drawGenerationFixture();await p.emit('MESSAGE_UPDATED',1);});

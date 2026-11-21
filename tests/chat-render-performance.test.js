@@ -63,13 +63,25 @@ test('unchanged and duplicate chat cards retain nodes and handlers while edits a
         assert.equal(await page.evaluate(()=>window.sourceReads.filter((_,i)=>i!==23).reduce((a,b)=>a+b,0)),0,'observer must route a local text mutation only to that floor');
         await page.evaluate(async()=>{
             window.sourceReads.fill(0);await window.preview.emit('GENERATION_STARTED','normal',{});
-            for(let i=0;i<100;i++){window.preview.chat[40].mes='reply '+i;document.querySelector('[mesid="40"] .mes_text').textContent='reply '+i;await window.preview.emit('STREAM_TOKEN_RECEIVED');}
+            for(let i=0;i<100;i++){window.preview.chat[40].mes='reply '+i;document.querySelector('[mesid="40"] .mes_text').textContent='reply '+i;await new Promise(resolve=>setTimeout(resolve,2));}
         });
         await page.waitForTimeout(150);
-        assert.equal(await page.evaluate(()=>window.sourceReads.reduce((a,b)=>a+b,0)),0,'manual start and stream must not parse history or the reply');
+        assert.equal(await page.evaluate(()=>window.preview.context.eventSource.listenerCount('STREAM_TOKEN_RECEIVED')),0,'manual mode must not subscribe to token events');
+        assert.equal(await page.evaluate(()=>window.sourceReads.reduce((a,b)=>a+b,0)),0,'manual output without token events must not parse history or the reply');
         await page.evaluate(async()=>{window.preview.chat[40].mes='image###final###';document.querySelector('[mesid="40"] .mes_text').textContent='image###final###';await window.preview.emit('GENERATION_ENDED');});
         await page.locator('[mesid="40"] .miao-image-card').waitFor();
         assert.equal(await page.evaluate(()=>window.sourceReads.slice(0,40).reduce((a,b)=>a+b,0)),0,'finalization only reads the completed reply');
+        for(const event of ['GENERATION_STOPPED','CHARACTER_MESSAGE_RENDERED']){
+            await page.evaluate(async event=>{
+                const p=window.preview;window.sourceReads.fill(0);await p.emit('GENERATION_STARTED','normal',{});
+                p.chat[40].mes='image###'+event+'###';document.querySelector('[mesid="40"] .mes_text').textContent='image###'+event+'###';
+            },event);
+            await page.waitForTimeout(150);
+            assert.equal(await page.evaluate(()=>window.sourceReads.reduce((a,b)=>a+b,0)),0,'reply stays untouched until '+event);
+            await page.evaluate(event=>window.preview.emit(event,40),event);
+            await page.waitForFunction(prompt=>document.querySelector('[mesid="40"] .miao-image-card')?.dataset.miaoPrompt===prompt,event);
+            assert.equal(await page.evaluate(()=>window.sourceReads.slice(0,40).reduce((a,b)=>a+b,0)),0,'completion never scans history');
+        }
         assert.deepEqual(errors,[]);
     }finally{await browser?.close();server.kill();}
 });

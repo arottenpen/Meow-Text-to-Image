@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {EventEmitter} from 'node:events';
 import {createStreamScheduler,streamOnlyMutations} from '../src/chat/stream-scheduler.js';
 import {imageBlob} from '../src/images/image-thumbnails.js';
 
@@ -35,15 +36,28 @@ test('only stream-floor changes are suppressed, history, chat structure and renu
     for(const records of [[active,{target:node(history)}],[{target:node(null)}],[{type:'attributes',attributeName:'mesid',target:node(floor)}],[]])assert.equal(streamOnlyMutations(records,floor),false);
     assert.equal(streamOnlyMutations([active],null),false);
 });
-test('actual token listener schedules only stream mode, never renders or queues per-token timers',()=>{
+test('token subscription exists only in enabled stream mode and switching detaches the original callback',()=>{
     const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
-    const listener=source.match(/c\.eventSource\.on\(c\.eventTypes\.STREAM_TOKEN_RECEIVED,([\s\S]*?)\n    \}\);/);
-    assert.ok(listener);let calls=0;
-    const context={generationChat:'chat',currentChat:()=> 'chat',streamActive:false,settings:{enabled:true,mode:'stream'},streamScanner:{schedule(){calls++;}}};
-    vm.createContext(context);vm.runInContext('var token='+listener[1]+'\n};',context);
-    for(let i=0;i<100;i++)context.token();assert.equal(calls,100);assert.equal(context.streamActive,true);
-    context.settings.mode='manual';context.token();context.settings.mode='auto';context.token();assert.equal(calls,100);
-    context.settings.mode='stream';context.generationChat='other';context.token();assert.equal(calls,100);
+    const start=source.indexOf('let streamTokenSource='),end=source.indexOf('\nconst chatRenderer=',start);
+    assert.ok(start>=0&&end>start);
+    const first=new EventEmitter(),second=new EventEmitter(),event='token';let active=first,calls=0,cancelled=0;
+    const context={generationChat:'chat',currentChat:()=> 'chat',streamActive:true,settings:{enabled:true,mode:'manual'},
+        ctx:()=>({eventSource:active,eventTypes:{STREAM_TOKEN_RECEIVED:event}}),streamScanner:{schedule(){calls++;},cancel(){cancelled++;}}};
+    vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+    for(const mode of ['manual','auto']){
+        context.settings.mode=mode;context.syncStreamListener();assert.equal(first.listenerCount(event),0);
+        for(let i=0;i<100;i++)first.emit(event);
+    }
+    assert.equal(calls,0);
+    context.settings.mode='stream';context.syncStreamListener();context.syncStreamListener();assert.equal(first.listenerCount(event),1);
+    for(let i=0;i<100;i++)first.emit(event);assert.equal(calls,100);
+    context.generationChat='other';first.emit(event);assert.equal(calls,100);
+    context.generationChat=null;context.streamActive=false;first.emit(event);assert.equal(calls,100);assert.equal(context.streamActive,false);
+    context.generationChat='chat';active=second;context.syncStreamListener();assert.equal(first.listenerCount(event),0);assert.equal(second.listenerCount(event),1);
+    second.emit(event);assert.equal(calls,101);
+    context.settings.enabled=false;context.syncStreamListener();assert.equal(second.listenerCount(event),0);second.emit(event);assert.equal(calls,101);
+    context.settings.enabled=true;context.syncStreamListener();assert.equal(second.listenerCount(event),1);
+    context.settings.mode='manual';context.syncStreamListener();assert.equal(second.listenerCount(event),0);assert.ok(cancelled>=2);
 });
 test('real end, stop and chat-change handlers cancel pending scans and retain their final refresh',()=>{
     const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
@@ -69,13 +83,24 @@ test('generation start skips history and macros in manual/disabled modes while p
     const end=source.indexOf('\n    });',start)+7;
     assert.ok(start>=0&&end>start);
     for(const mode of ['manual','auto','stream'])for(const enabled of [false,true]){
-        let callback,parsed=0,macros=0,cancels=0;
-        const context={c:{eventTypes:{GENERATION_STARTED:'start'},eventSource:{on:(_,fn)=>callback=fn}},settings:{mode,enabled,eggProfileEnabled:true},streamScanner:{cancel(){cancels++;}},streamActive:true,generationChat:null,autoSession:{old:true},currentChat:()=> 'chat',ctx:()=>({chat:[{mes:'fixture'}]}),blocks(){parsed++;return [{prompt:'fixture'}];},identity:()=> 'identity',eggMarkerCache:{read(){macros++;return Promise.resolve('marker');}}};
+        let callback,parsed=0,macros=0,cancels=0,synced=0,observed=0;
+        const context={c:{eventTypes:{GENERATION_STARTED:'start'},eventSource:{on:(_,fn)=>callback=fn}},settings:{mode,enabled,eggProfileEnabled:true},streamScanner:{cancel(){cancels++;}},syncStreamListener(){synced++;},observeChat(){observed++;},streamActive:false,generationChat:null,autoSession:{old:true},currentChat:()=> 'chat',ctx:()=>({chat:[{mes:'fixture'}]}),blocks(){parsed++;return [{prompt:'fixture'}];},identity:()=> 'identity',eggMarkerCache:{read(){macros++;return Promise.resolve('marker');}}};
         vm.createContext(context);vm.runInContext(source.slice(start,end),context);
         callback('normal',{},false);
         const automatic=enabled&&mode!=='manual';
         assert.equal(parsed,automatic?1:0);assert.equal(macros,automatic?1:0);assert.equal(cancels,1);
-        assert.equal(context.streamActive,false);assert.equal(context.generationChat,'chat');
+        assert.equal(context.streamActive,true);assert.equal(context.generationChat,'chat');assert.equal(synced,1);assert.equal(observed,1);
         assert.equal(context.autoSession===null,!automatic);
+    }
+});
+
+test('dry-run, quiet and impersonation starts never acquire a reply lock or subscribe to tokens',()=>{
+    const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
+    const start=source.indexOf('    c.eventSource.on(c.eventTypes.GENERATION_STARTED,'),end=source.indexOf('\n    });',start)+7;
+    for(const [type,dryRun] of [['normal',true],['quiet',false],['impersonate',false]]){
+        let callback,calls=0;
+        const context={c:{eventTypes:{GENERATION_STARTED:'start'},eventSource:{on:(_,fn)=>callback=fn}},streamScanner:{cancel(){calls++;}},syncStreamListener(){calls++;},streamActive:false,generationChat:null,autoSession:null};
+        vm.createContext(context);vm.runInContext(source.slice(start,end),context);callback(type,{},dryRun);
+        assert.equal(calls,0);assert.equal(context.streamActive,false);assert.equal(context.generationChat,null);
     }
 });

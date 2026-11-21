@@ -589,16 +589,25 @@ function handleChatMutations(records){
 
 function observeChat(){
     // Some hosts replace #chat or mount it after extensions have initialized.
-    if(!chatRootObserver){
-        chatRootObserver=new MutationObserver(()=>{
-            const root=document.getElementById('chat');if(root===observedChat)return;
-            chatObserver?.disconnect();observedChat=null;observeChat();scheduleRender(false);
-        });
-        chatRootObserver.observe(document.body,{childList:true,subtree:true});
-    }
-    const root=document.getElementById('chat');if(!root)return;
+    if(!chatRootObserver)chatRootObserver=new MutationObserver(function handleChatRootMutations(records){
+        const root=document.getElementById('chat');
+        const moved=root&&records.some(record=>[...record.addedNodes,...record.removedNodes].some(node=>node===root||node.contains?.(root)));
+        if(root===observedChat&&!moved)return;
+        observeChat();scheduleRender(false);
+    });
+    const root=document.getElementById('chat');
+    chatRootObserver.disconnect();
+    // Watch only ancestor child lists: reply markdown must not wake this observer.
+    if(root){
+        for(let parent=root.parentNode;parent;parent=parent.parentNode)chatRootObserver.observe(parent,{childList:true});
+    }else chatRootObserver.observe(document.body,{childList:true,subtree:true});
+    chatObserver?.disconnect();observedChat=root;
+    if(!root)return;
     if(!chatObserver)chatObserver=new MutationObserver(handleChatMutations);
-    observedChat=root;chatObserver.observe(observedChat,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['src','mesid']});
+    // Non-stream modes use host edit/finalization events during a reply. Keep
+    // only direct message insertions/removals, even after a card render resumes us.
+    const lifecycleOnly=streamActive&&generationChat===currentChat()&&(!settings.enabled||settings.mode!=='stream');
+    chatObserver.observe(root,lifecycleOnly?{childList:true}:{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['src','mesid']});
 }
 async function installWorld(file,{targetName,activate=true,existing,preserveMacros=false}={}) {
     const data=JSON.parse(await file.text());if(!data.entries)throw new Error('世界书需要 entries 字段');
@@ -1050,7 +1059,7 @@ async function openSettings(initialTab,initialFavorite,initialPage) {
             return {url,signature:sampleSignature(profile,settings.vibeLibrary,settings.samplePrompt),created:Date.now()};
         },
         onChange:async reason=>{
-            if(reason!=='favorites'){autoSession=null;refreshFloating();}renderAll();
+            if(reason!=='favorites'){autoSession=null;syncStreamListener();refreshFloating();}renderAll();
         },
         saveKey:async(input,{notify=true}={})=>{await saveCurrentKey({input,vault:directVault,settings,writeServerKey:key=>writeSecret(SECRET_KEYS.NOVEL,key),fingerprint:fingerprintKey,save});if(notify)notices.success(settings.rememberDirectKey?'NAI Key 已保存到酒馆和当前设备，刷新后可继续使用':'NAI Key 已保存，直连 Key 仅在当前页面暂存');},
         saveCustomConnection:async(values,{notify=true}={})=>{if(getCurrentUserHandle()!==directUser)throw Error('酒馆用户已切换，请刷新页面后重试');await saveCustomConnection({settings,vault:customVault,...values,fingerprint:fingerprintKey,save});if(notify)notices.success('自定义连接已保存');},
@@ -1116,6 +1125,20 @@ function scanStream() {
     return autoLatest();
 }
 const streamScanner=createStreamScheduler(scanStream,{onError:generationError});
+let streamTokenSource=null,streamTokenEvent;
+function onStreamToken(){
+    if(!settings.enabled||settings.mode!=='stream'||generationChat!==currentChat())return;
+    streamScanner.schedule();
+}
+function syncStreamListener(){
+    const c=ctx(),event=c.eventTypes.STREAM_TOKEN_RECEIVED;
+    const source=settings.enabled&&settings.mode==='stream'&&event?c.eventSource:null;
+    if(source===streamTokenSource&&event===streamTokenEvent)return;
+    if(streamTokenSource)streamTokenSource.removeListener(streamTokenEvent,onStreamToken);
+    streamTokenSource=source;streamTokenEvent=event;
+    if(source)source.on(event,onStreamToken);
+    else streamScanner.cancel();
+}
 const chatRenderer=createRenderScheduler({
     getScope:()=>({key:currentChat(),chat:ctx().chat}),
     render:messages=>{const auto=autoScheduled;autoScheduled=false;if(messages===null)renderAll();else renderMessages(messages);if(auto)void autoLatest();},
@@ -1157,17 +1180,14 @@ async function init() {
         // Quiet prompts and prompt previews do not render a chat reply and may
         // never emit GENERATION_ENDED. They must not hide the last floor's cards.
         if(dryRun||type==='quiet'||type==='impersonate')return;
-        streamScanner.cancel();streamActive=false;generationChat=currentChat();
+        // Track the reply lifecycle without waiting for per-token events.
+        streamScanner.cancel();streamActive=true;generationChat=currentChat();syncStreamListener();observeChat();
         if(!settings.enabled||settings.mode==='manual'){autoSession=null;return;}
         autoSession={chat:currentChat(),enabled:settings.enabled&&settings.mode!=='manual',attempted:new Set(),marker:settings.eggProfileEnabled?eggMarkerCache.read():Promise.resolve(''),existing:new Set(ctx().chat.flatMap((m,i)=>blocks(m).map(b=>`${i}:${identity(m,b)}`)))};
     });
     c.eventSource.on(c.eventTypes.GENERATION_ENDED,()=>{const same=generationChat===currentChat();streamScanner.cancel();streamActive=false;generationChat=null;scheduleRender(false,latestImageMessage(ctx().chat));if(same)autoLatest();});
     if(c.eventTypes.GENERATION_STOPPED)c.eventSource.on(c.eventTypes.GENERATION_STOPPED,()=>{const same=generationChat===currentChat();streamScanner.cancel();streamActive=false;generationChat=null;scheduleRender(false,latestImageMessage(ctx().chat));if(same&&(settings.mode==='stream'||settings.eggProfileEnabled))void autoLatest();});
-    c.eventSource.on(c.eventTypes.STREAM_TOKEN_RECEIVED,()=>{
-        if(generationChat!==currentChat())return;
-        streamActive=true;
-        if(settings.enabled&&settings.mode==='stream')streamScanner.schedule();
-    });
+    syncStreamListener();
     for(const event of ['SECRET_WRITTEN','SECRET_DELETED','SECRET_ROTATED'])if(c.eventTypes[event])c.eventSource.on(c.eventTypes[event],key=>{if(key===SECRET_KEYS.NOVEL){settings.keyHash='';save();settingsHost?.dispatchEvent(new Event('miao-key-changed'));}});
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme);
     if(settings.enabled&&!settings.installed)await installDefaults();indexChatImages();renderAll();autoLatest();
