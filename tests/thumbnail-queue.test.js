@@ -63,3 +63,23 @@ test('generated original returns before thumbnail work, queues only URL, and rep
     assert.equal(calls.length,1);assert.deepEqual(calls[0],[url(0)]);assert.equal(warnings.length,0);
     rejectThumbnail(Error('background failure'));await delay(0);assert.equal(warnings.length,1);
 });
+
+function savedChatFixture({image={dataset:{miaoOriginalUrl:url(0)}},ready=new Promise(()=>{})}={}){
+ const source=readFileSync(new URL('../index.js',import.meta.url),'utf8'),body=source.slice(source.indexOf('async function saveGeneratedImage('),source.indexOf('\nconst resourceUpdater='));
+ const calls=[],timers=new Map();let sequence=0;
+ const context={inStage:(_name,run)=>run(),saveBase64AsFile:async()=>url(0),document:{querySelectorAll:()=>image?[image]:[]},imagePresentation:{whenReady:()=>ready},
+  thumbnails:{ensure:async(...args)=>calls.push(args)},notices:{warning:()=>{}},setTimeout(fn,ms){const id=++sequence;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}};
+ vm.createContext(context);vm.runInContext(body,context);
+ return {context,calls,image,timers,fire(ms){const entry=[...timers].find(([,value])=>value.ms===ms);assert.ok(entry,'expected scheduled timer');timers.delete(entry[0]);entry[1].fn();}};
+}
+test('saved chat image starts eagerly before its thumbnail and releases the wait on decode completion',async()=>{
+ const gate=deferred(),f=savedChatFixture({ready:gate.promise});
+ assert.equal(await f.context.saveGeneratedImage('fixture-base64','fixture','0',{chat:true}),url(0));assert.deepEqual(f.calls,[]);
+ f.fire(0);assert.equal(f.image.loading,'eager');assert.equal(f.image.fetchPriority,'high');await delay(0);assert.deepEqual(f.calls,[]);
+ gate.resolve(true);await delay(0);assert.deepEqual(f.calls,[[url(0)]]);assert.equal(f.timers.size,0);
+});
+test('removed chat cards and a stalled image cannot prevent thumbnail processing indefinitely',async()=>{
+ const removed=savedChatFixture({image:null});await removed.context.saveGeneratedImage('fixture-base64','fixture','0',{chat:true});removed.fire(0);await delay(0);assert.deepEqual(removed.calls,[[url(0)]]);
+ const stalled=savedChatFixture();await stalled.context.saveGeneratedImage('fixture-base64','fixture','0',{chat:true});stalled.fire(0);assert.deepEqual(stalled.calls,[]);
+ stalled.fire(15000);await delay(0);assert.deepEqual(stalled.calls,[[url(0)]]);assert.equal(stalled.timers.size,0);
+});

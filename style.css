@@ -2292,7 +2292,8 @@
 /* Keep the gallery's scroll range while replacing a page or refreshing its data. */
 .miao-history-list {display: flex; flex-direction: column;}
 .miao-history-list>.miao-pager {margin-top: auto; padding-top: 12px;}
-img[data-miao-export-state=loading] {visibility: hidden;}
+img[data-miao-export-state=loading],img[data-miao-load-state=loading] {visibility: hidden;}
+.miao-image-card>img[data-miao-load-state=loading] {aspect-ratio: var(--miao-image-ratio,1);}
 .miao-batch-export {display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; text-align: left;}
 .miao-batch-export>header {flex: none; padding: 16px; border-bottom: 1px solid var(--mi-line);}
 .miao-batch-export h3 {margin: 0; font-size: 17px;}

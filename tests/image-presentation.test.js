@@ -47,3 +47,48 @@ test('export MIME types omit HTTP charset parameters and forgetting a deleted or
  const converted=await f.presentation.file({url:'/original.png',name:'original.png'},'jpg');assert.equal(converted.blob.type,'image/jpeg');assert.equal(f.writes.length,1);
  const path=await f.presentation.forget('/original.png');assert.equal('/'+path,converted.url);f.files.delete('/'+path);assert.equal(await f.presentation.jpeg('/original.png'),converted.url);assert.equal(f.writes.length,2);f.files.delete(converted.url);assert.equal((await f.presentation.file({url:'/original.png',name:'original.png'},'jpg')).blob.type,'image/jpeg');assert.equal(f.writes.length,3);
 });
+
+class LoadImage extends EventTarget{
+ constructor(){super();this.dataset={};this.complete=false;this.naturalWidth=0;this.alt='fixture';}
+ setAttribute(name,value){this[name]=value;}
+ removeAttribute(name){delete this[name];}
+}
+test('chat PNG stays loading until transfer and decoding finish without another image fetch',async()=>{
+ let release;const element=new LoadImage(),f=fixture();f.setFormat('png');
+ element.decode=()=>new Promise(resolve=>release=resolve);
+ f.presentation.bind(element,'/original.png',{lazy:true,decode:true});
+ const ready=f.presentation.whenReady(element);let done=false;void ready.then(()=>done=true);
+ element.naturalWidth=512;await tick();assert.equal(done,false);assert.equal(element.dataset.miaoLoadState,'loading');
+ element.complete=true;element.dispatchEvent(new Event('load'));await tick();assert.equal(done,false);assert.equal(element['aria-busy'],'true');
+ release();assert.equal(await ready,true);assert.equal(element.dataset.miaoLoadState,'ready');assert.equal(element['aria-busy'],undefined);
+ assert.equal(element.src,'/original.png');assert.deepEqual(f.reads,[]);
+});
+test('an old decoding result cannot reveal a new source or a refreshed format',async()=>{
+ let release;const element=new LoadImage(),f=fixture();f.setFormat('png');element.decode=()=>new Promise(resolve=>release=resolve);
+ f.presentation.bind(element,'/original.png',{decode:true});const oldReady=f.presentation.whenReady(element);
+ element.dispatchEvent(new Event('load'));await tick();f.presentation.bind(element,'/second.png',{decode:true});assert.equal(await oldReady,false);
+ release();await tick();assert.equal(element.src,'/second.png');assert.equal(element.dataset.miaoLoadState,'loading');
+ f.setFormat('jpg');f.presentation.refresh({querySelectorAll:()=>[element]});await f.presentation.jpeg('/second.png');await tick();
+ assert.ok(element.src.endsWith('.jpg'));assert.equal(element.dataset.miaoLoadState,'loading');
+ element.decode=async()=>{};element.complete=true;element.naturalWidth=512;element.dispatchEvent(new Event('load'));
+ assert.equal(await f.presentation.whenReady(element),true);assert.equal(element.dataset.miaoLoadState,'ready');
+});
+test('cached images and hosts without image.decode still complete the chat load gate',async()=>{
+ const f=fixture();f.setFormat('png');const cached=new LoadImage();cached.complete=true;cached.naturalWidth=64;cached.decode=async()=>{};
+ f.presentation.bind(cached,'/original.png',{decode:true});assert.equal(await f.presentation.whenReady(cached),true);
+ const legacy=new LoadImage();f.presentation.bind(legacy,'/original.png',{decode:true});legacy.complete=true;legacy.naturalWidth=64;legacy.dispatchEvent(new Event('load'));
+ assert.equal(await f.presentation.whenReady(legacy),true);assert.equal(legacy.dataset.miaoLoadState,'ready');
+});
+test('load errors release thumbnail waits and rebinding can retry the same source',async()=>{
+ const f=fixture();f.setFormat('png');const element=new LoadImage();
+ f.presentation.bind(element,'/original.png',{decode:true});const failed=f.presentation.whenReady(element);element.dispatchEvent(new Event('error'));
+ assert.equal(await failed,false);assert.equal(element.dataset.miaoLoadState,'error');assert.equal(element['aria-busy'],undefined);
+ f.presentation.bind(element,'/original.png',{decode:true});assert.equal(element.dataset.miaoLoadState,'loading');
+ element.complete=true;element.naturalWidth=64;element.decode=async()=>{throw Error('unsupported decoder');};element.dispatchEvent(new Event('load'));
+ assert.equal(await f.presentation.whenReady(element),true);
+});
+test('JPG conversion errors release the chat gate without exposing original PNG bytes',async()=>{
+ const errors=[],f=fixture({convert:async()=>{throw Error('fixture conversion failed');},onError:error=>errors.push(error)}),element=new LoadImage();
+ f.presentation.bind(element,'/original.png',{decode:true});assert.equal(await f.presentation.whenReady(element),false);
+ assert.equal(element.src,undefined);assert.equal(element.dataset.miaoLoadState,'error');assert.equal(element.dataset.miaoExportState,'error');assert.equal(errors.length,1);
+});

@@ -112,10 +112,22 @@ const thumbnails=createThumbnails({fetchImage:url=>hostFetch(url),saveImage:save
 }});
 const imagePresentation=createImagePresentation({getFormat:()=>settings.exportFormat,fetchImage:url=>hostFetch(url),saveJPEG:async(blob,folder,name)=>saveBase64AsFile(await blobBase64(blob),folder,name,'jpg'),onError:error=>notices.error('JPG 转换失败：'+error.message,'图片预览')});
 const bindImage=(image,url,options)=>imagePresentation.bind(image,url,options);
-async function saveGeneratedImage(data,folder,name){
+async function saveGeneratedImage(data,folder,name,{chat=false}={}){
     const url=await inStage('image-save',()=>saveBase64AsFile(data,folder,name,'png'));
     // Queue only the saved URL: do not retain generated Base64/Blobs while waiting.
-    void thumbnails.ensure(url).catch(()=>notices.warning('原图已保存，缩略图未生成，可在图片页重试','喵喵文生图'));
+    const thumbnail=()=>thumbnails.ensure(url).catch(()=>notices.warning('原图已保存，缩略图未生成，可在图片页重试','喵喵文生图'));
+    if(chat){
+        // Yield the saved URL so renderTask can insert the foreground image first.
+        setTimeout(()=>{
+            const image=[...document.querySelectorAll('#chat .miao-image-card>img')].find(image=>image.dataset.miaoOriginalUrl===url);
+            if(!image){void thumbnail();return;}
+            image.loading='eager';image.fetchPriority='high';
+            let timer;
+            // A removed card or failed conversion must not strand its thumbnail.
+            void Promise.race([imagePresentation.whenReady(image),new Promise(resolve=>{timer=setTimeout(resolve,15000);})])
+                .finally(()=>clearTimeout(timer)).then(thumbnail);
+        },0);
+    }else void thumbnail();
     return url;
 }
 const resourceUpdater=createResourceUpdater({settings,localBase:base,save,onChange:()=>{eggMarkerCache.invalidate();settingsHost?.dispatchEvent(new Event('miao-resources-changed'));},onAvailable:({latest})=>notices.info(`${latest.worldName} 可更新，点此查看`,'喵喵文生图',{escapeHtml:true,timeOut:10000,onclick:()=>openSettings('resources')})});
@@ -312,7 +324,7 @@ function startGeneration(message,block,{automatic=false,egg=false}={}) {
         const folder=storage.root;
         task.status='正在生图'; renderTask(task);
         const data=await requestImage(request,task,()=>{const target=taskTarget(task);return !!target&&(!automatic||canAutoGenerate(ctx().chat,target.message,settings.mode,streamActive));});
-        const url=await saveGeneratedImage(data,folder,`miao-${Date.now()}-${randomId()}`);
+        const url=await saveGeneratedImage(data,folder,`miao-${Date.now()}-${randomId()}`,{chat:true});
         if(rememberImage(settings.imageArchive,url,storage.context,location.href))save();
         // Switching swipes does not invalidate an image already being generated.
         target=taskTarget(task,true);if(!target) { notices.info('图片已保存，但原消息已删除或修改：'+url); return; }
@@ -376,7 +388,7 @@ function makeCard(message,block,parsedBlocks=blocks(message),view=cardView(messa
     const actions=el('div',undefined,'miao-image-tools');actions.hidden=true;
     const button=(label,fn,parent=actions)=>{const b=el('button',label,'miao-button');b.type='button';if(label==='删除')bindButtonPress(b,()=>guard(fn)());else b.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();guard(fn)();});parent.append(b);return b;};
     if(current?.url&&!current.deleted){
-        const image=el('img');image.alt='生成的剧情插图';bindImage(image,current.url,{lazy:true});image.draggable=false;image.tabIndex=0;image.setAttribute('role','button');
+        const image=el('img');image.alt='生成的剧情插图';bindImage(image,current.url,{lazy:true,decode:true});image.draggable=false;image.tabIndex=0;image.setAttribute('role','button');
         const setRatio=(width,height)=>{if(width>0&&height>0&&Number.isFinite(width/height))card.style.setProperty('--miao-image-ratio',String(width/height));};
         setRatio(current.request?.width,current.request?.height);
         image.addEventListener('load',()=>setRatio(image.naturalWidth,image.naturalHeight));
@@ -542,7 +554,7 @@ function renderMessageElement(mes){
                 old.dataset.status=view.status;
                 // This bind is a no-op for an unchanged source/format, and can
                 // recover a previously failed JPG conversion without new DOM.
-                if(image)bindImage(image,view.current.url,{lazy:true});
+                if(image)bindImage(image,view.current.url,{lazy:true,decode:true});
                 continue;
             }
             const card=makeCard(message,block,found,view);

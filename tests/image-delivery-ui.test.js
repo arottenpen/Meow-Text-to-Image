@@ -27,7 +27,13 @@ test('completed chat images load before slow queue finish and chat-save acknowle
      // Hold acknowledgement delivery after the real queue RPC, so a timed-out
      // fetch cannot leave this fixture waiting for an already-aborted request.
      const queueFinishGate=new Promise(resolve=>p.releaseQueueFinish=resolve),fetchQueue=window.fetch;
-     p.slowSave=true;window.fetch=async(url,options)=>{
+     p.chatDecodeGate=new Promise(resolve=>p.releaseChatDecode=resolve);
+      const nativeDecode=HTMLImageElement.prototype.decode;
+      HTMLImageElement.prototype.decode=async function(){
+       if(this.closest('.miao-image-card')&&this.dataset.miaoOriginalUrl){p.chatDecodeStarted=true;await p.chatDecodeGate;}
+       return nativeDecode.call(this);
+      };
+      p.slowSave=true;window.fetch=async(url,options)=>{
       if(String(url)==='https://queue.test/finish'){
        p.finishBody=JSON.parse(options.body);p.finishStarted=true;
        const response=await fetchQueue(url,options);p.finishResponseReceived=response.ok;
@@ -39,7 +45,16 @@ test('completed chat images load before slow queue finish and chat-save acknowle
     },format);
     await page.locator('.miao-image-card').getByRole('button',{name:'生成插图',exact:true}).click();
     await page.waitForFunction(()=>!!window.preview.finishStarted);
-    await page.waitForFunction(()=>{const image=document.querySelector('.miao-image-card>img');return image?.complete&&image.naturalWidth>0&&image.dataset.miaoExportState==='ready';});
+    await page.waitForFunction(()=>window.preview.chatDecodeStarted===true);
+    const loading=await page.evaluate(()=>{
+     const image=document.querySelector('.miao-image-card>img');
+     return {complete:image.complete,width:image.naturalWidth,visibility:getComputedStyle(image).visibility,state:image.dataset.miaoLoadState,loading:image.loading,priority:image.fetchPriority,thumbnailWrites:(window.preview.imageWrites||[]).filter(item=>item.folder==='miao-nai-thumbnails').length};
+    });
+    assert.equal(loading.complete,true);assert.ok(loading.width>0);assert.equal(loading.state,'loading');assert.equal(loading.visibility,'hidden');
+    assert.equal(loading.loading,'eager');assert.equal(loading.priority,'high');assert.equal(loading.thumbnailWrites,0,'thumbnail work must yield to foreground decoding');
+    await page.evaluate(()=>window.preview.releaseChatDecode());
+    await page.waitForFunction(()=>{const image=document.querySelector('.miao-image-card>img');return image?.complete&&image.naturalWidth>0&&image.dataset.miaoLoadState==='ready'&&getComputedStyle(image).visibility==='visible';});
+    await page.waitForFunction(()=>(window.preview.imageWrites||[]).some(item=>item.folder==='miao-nai-thumbnails'));
     const result=await page.evaluate(()=>{
      const p=window.preview,image=document.querySelector('.miao-image-card>img'),record=p.chat[0].miao_nai_image_swipes[0]['body:0:delivery scene'];
      return {posts:p.calls.length,finishAcknowledged:!!p.finishAcknowledged,outcome:p.finishBody.outcome,savePending:!!p.releaseSave,progress:!!document.querySelector('.miao-image-progress'),src:image.getAttribute('src'),original:record.url};
@@ -54,7 +69,7 @@ test('completed chat images load before slow queue finish and chat-save acknowle
     await page.waitForFunction(()=>window.preview.finishAcknowledged===true);
     assert.equal(await page.evaluate(()=>window.preview.calls.length),1);assert.deepEqual(errors,[]);
    }finally{
-    await page.evaluate(()=>{window.preview?.releaseQueueFinish?.();window.preview?.releaseSave?.();}).catch(()=>{});await page.close();
+    await page.evaluate(()=>{window.preview?.releaseChatDecode?.();window.preview?.releaseQueueFinish?.();window.preview?.releaseSave?.();}).catch(()=>{});await page.close();
    }
   }
  }finally{await browser?.close();server.kill();}
