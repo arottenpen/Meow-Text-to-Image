@@ -113,12 +113,14 @@ test('new client 429 releases without legacy cooldown; queue errors and ambiguou
   else{assert.equal(q.lanes.get(hash).active.phase,'uncertain');assert.equal(q.lanes.get(hash).cooldownUntil,undefined);}
  }
 });
-test('new Node backup server negotiates capability and releases after a single response',async()=>{
+test('new Node backup server negotiates capability and releases after a single response',{timeout:5000},async()=>{
  const {createQueueServer}=await import('../queue-service/service.mjs');
  const q=new LeaseQueue(),server=createQueueServer({queue:q});await new Promise(r=>server.listen(0,'127.0.0.1',r));
  try{
-  let sent=0;assert.equal(await runWithQueue({url:'http://127.0.0.1:'+server.address().port,keyHash:hash,generate:controls=>sendPrepared({source:'nai-generation',send:async()=>{sent++;return 'image';}},controls)}),'image');
-  assert.equal(sent,1);assert.equal(q.stats().active,0);
+  let finish;const finished=new Promise(resolve=>finish=resolve);
+  const fetchImpl=async(url,options)=>{const response=await fetch(url,options);if(url.endsWith('/finish'))finish();return response;};
+  let sent=0;assert.equal(await runWithQueue({url:'http://127.0.0.1:'+server.address().port,keyHash:hash,fetchImpl,generate:controls=>sendPrepared({source:'nai-generation',send:async()=>{sent++;return 'image';}},controls)}),'image');
+  assert.equal(sent,1);await finished;assert.equal(q.stats().active,0);
  }finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
 });
 

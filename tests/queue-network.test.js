@@ -111,20 +111,21 @@ test('broken queue connections never fall back to uncoordinated generation or cl
     await assert.rejects(runWithQueue({twoPhase:false,url:'https://queue.example',keyHash:'a'.repeat(64),fetchImpl:async()=>Response.json({your_turn:true}),generate:async()=>{sent++;}}),/队列状态无效/);assert.equal(sent,0);
 });
 
-test('new protocol ST relay forwards begin/finish with derived proofs and no raw tokens or NAI data',async()=>{
+test('new protocol ST relay forwards begin/finish with derived proofs and no raw tokens or NAI data',{timeout:5000},async()=>{
  const {default:worker,MiaoKeyQueue}=await import('../cloudflare/worker.js');
  const data=new Map();let pending=Promise.resolve(),alarm=null;
  const storage={get:async key=>structuredClone(data.get(key)),put:async(key,value)=>data.set(key,structuredClone(value)),delete:async key=>data.delete(key),getAlarm:async()=>alarm,setAlarm:async value=>{alarm=value;},deleteAlarm:async()=>{alarm=null;},transaction:async fn=>fn()};
  const ctx={storage,blockConcurrencyWhile(fn){const result=pending.then(fn);pending=result.catch(()=>{});return result;}};
  const object=new MiaoKeyQueue(ctx),env={MIAO_KEY_QUEUE:{idFromName:hash=>hash,get:()=>object}},visited=[];
+ let finish;const finished=new Promise(resolve=>finish=resolve);
  const requestJSON=createQueueTransport({fetchImpl:async(url,opts)=>{
   if(url.startsWith('https:'))throw new TypeError('device offline');
-  const target=JSON.parse(opts.body).url;visited.push(target);return worker.fetch(new Request(target),env);
+  const target=JSON.parse(opts.body).url;visited.push(target);const response=await worker.fetch(new Request(target),env);if(new URL(target).searchParams.get('op')==='finish')finish();return response;
  }});
  let sent=0;
  const {sendPrepared}=await import('../src/generation/generation-lifecycle.js');
  assert.equal(await runWithQueue({url:'https://queue.example',keyHash:'d'.repeat(64),requestJSON,generate:controls=>sendPrepared({source:'nai-generation',send:async()=>{sent++;return 'image';}},controls)}),'image');
- assert.equal(sent,1);
+ assert.equal(sent,1);await finished;
  for(const op of ['begin-generation','finish']){
   const target=new URL(visited.find(url=>new URL(url).searchParams.get('op')===op));const input=JSON.parse(target.searchParams.get('data'));
   assert.equal(input.release_proof.length,64);assert.equal('lock_token' in input,false);
@@ -132,19 +133,21 @@ test('new protocol ST relay forwards begin/finish with derived proofs and no raw
  assert.equal(visited.some(url=>/lock_token|Authorization|prompt|fixture-key/.test(url)),false);assert.equal(object.queue.stats().active,0);
 });
 
-test('R16: ST derived-proof relay and TT direct support all retry attempts with zero raw token URLs',async()=>{
+test('R16: ST derived-proof relay and TT direct support all retry attempts with zero raw token URLs',{timeout:5000},async()=>{
  const {default:worker,MiaoKeyQueue}=await import('../cloudflare/worker.js');
  const {sendPrepared}=await import('../src/generation/generation-lifecycle.js'),{httpRequestError}=await import('../src/platform/request-errors.js');
  for(const relay of [true,false]){
   let now=0,pending=Promise.resolve(),alarm=null;const data=new Map(),visited=[],direct=[];
   const ctx={storage:{get:async k=>structuredClone(data.get(k)),put:async(k,v)=>data.set(k,structuredClone(v)),delete:async k=>data.delete(k),getAlarm:async()=>alarm,setAlarm:async v=>{alarm=v;},deleteAlarm:async()=>{alarm=null;},transaction:async f=>f()},blockConcurrencyWhile(f){const p=pending.then(f);pending=p.catch(()=>{});return p;}};
   const object=new MiaoKeyQueue(ctx);object.queue.now=()=>now;const env={MIAO_KEY_QUEUE:{idFromName:k=>k,get:()=>object}};
+  let finish;const finished=new Promise(resolve=>finish=resolve);
+  const respond=async request=>{const response=await worker.fetch(request,env);const target=new URL(request.url);if(target.pathname==='/finish'||target.searchParams.get('op')==='finish')finish();return response;};
   const requestJSON=createQueueTransport({allowRelay:()=>relay,now:()=>now,fetchImpl:async(url,opts)=>{
-   if(url.startsWith('https:')){direct.push(url);if(relay)throw new TypeError('fixture direct blocked');return worker.fetch(new Request(url,opts),env);}
-   assert.equal(relay,true);const target=JSON.parse(opts.body).url;visited.push(target);return worker.fetch(new Request(target),env);
+   if(url.startsWith('https:')){direct.push(url);if(relay)throw new TypeError('fixture direct blocked');return respond(new Request(url,opts));}
+   assert.equal(relay,true);const target=JSON.parse(opts.body).url;visited.push(target);return respond(new Request(target));
   }});
   let posts=0;assert.equal(await runWithQueue({url:'https://queue.example',keyHash:'d'.repeat(64),requestJSON,autoRetry:true,now:()=>now,sleep:async ms=>{now+=ms;},generate:controls=>sendPrepared({source:'nai-generation',send:async()=>{if(++posts<4)throw httpRequestError({source:'nai-generation',status:429});return 'image';}},controls)}),'image');
-  assert.equal(posts,4);assert.equal(now,30000);assert.equal(object.queue.stats().active,0);
+  assert.equal(posts,4);assert.equal(now,30000);await finished;assert.equal(object.queue.stats().active,0);
   if(relay){
    assert.equal(direct.length,1);const retries=visited.filter(u=>new URL(u).searchParams.get('op')==='retry-generation');assert.equal(retries.length,3);
    const attempt=JSON.parse(new URL(retries[0]).searchParams.get('data'));assert.equal(attempt.attempt_no,0);assert.equal(attempt.retry_protocol,1);assert.equal(attempt.release_proof.length,64);assert.ok(attempt.attempt_id);

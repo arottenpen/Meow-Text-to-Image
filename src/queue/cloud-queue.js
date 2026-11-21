@@ -102,9 +102,16 @@ export async function runWithQueue({url,keyHash,greeting='',generationTimeoutMs,
             if(naiSendAttempted||finished||!canContinue()||twoPhase&&!beginConfirmed||now()-verifiedAt<0||now()-verifiedAt>=sendBudget)throw stageError('queue',Error('排队权限已失效，未发送新的生图请求，请重新生成'));
             explicitlyRejected=false;naiSendAttempted=true;
         };
-        const onResponse=async()=>{
+        const onResponse=()=>{
             responseReceived=true;clearInterval(heartbeat);finished=true;
-            if(!released){released=true;try{await call(twoPhase?'/finish':'/complete',{lock_token:lockToken,...attemptFields(),...(twoPhase?{outcome:'success'}:{})});}catch(error){onReleaseError(error);}}
+            if(!released){
+                released=true;
+                // Start releasing immediately, but do not hold the completed image
+                // behind acknowledgement retries. Server deadlines still recover
+                // a lost release; only the queue RPC is retried, never generation.
+                void call(twoPhase?'/finish':'/complete',{lock_token:lockToken,...attemptFields(),...(twoPhase?{outcome:'success'}:{})})
+                    .catch(error=>{try{onReleaseError(error);}catch{}});
+            }
         };
         try{
             preparationStarted=true;

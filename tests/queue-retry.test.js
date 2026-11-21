@@ -5,6 +5,7 @@ import {runWithQueue} from '../src/queue/cloud-queue.js';
 import {queueCapabilities} from '../shared/queue-protocol.js';
 import {sendPrepared} from '../src/generation/generation-lifecycle.js';
 import {httpRequestError} from '../src/platform/request-errors.js';
+import {queueJSON} from '../src/queue/queue-network.js';
 const hash='6'.repeat(64),who=id=>({key_hash:hash,user_id:'retry-user-'+id,task_id:'retry-task-'+id,protocol:2,retry_protocol:1});
 const dispatch=q=>async(url,{body}={})=>{
  try{switch(new URL(url).pathname){case '/ping':return {ready:true,capabilities:queueCapabilities};case '/join-queue':return q.join(body);case '/my-turn':return q.turn(body);case '/begin-generation':return q.begin(body);case '/retry-generation':return q.retry(body);case '/finish':return q.finish(body);default:return q.release(body);}}
@@ -86,11 +87,14 @@ test('R15: old cooldown persists across new join, new refusal does not extend it
 });
 
 test('R16: Node HTTP supports four attempts on the original holder without shared cooldown',async()=>{
- const {createQueueServer}=await import('../queue-service/service.mjs');let now=0,posts=0;
+ const {createQueueServer}=await import('../queue-service/service.mjs');let now=0,posts=0,completion;
  const q=new LeaseQueue({now:()=>now}),server=createQueueServer({queue:q});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  try{
-  const result=await runWithQueue({url:'http://127.0.0.1:'+server.address().port,keyHash:hash,autoRetry:true,now:()=>now,sleep:async ms=>{now+=ms;},generate:controls=>sendPrepared({source:'nai-generation',send:async()=>{if(++posts<4)throw refusal();return 'image';}},controls)});
-  assert.equal(result,'image');assert.equal(posts,4);assert.equal(now,30000);assert.equal(q.stats().active,0);assert.equal(q.lanes.get(hash)?.cooldownUntil,undefined);
+  const result=await runWithQueue({url:'http://127.0.0.1:'+server.address().port,keyHash:hash,autoRetry:true,now:()=>now,sleep:async ms=>{now+=ms;},requestJSON:(url,...args)=>{const response=queueJSON(url,...args);if(url.endsWith('/finish'))completion=response;return response;},generate:controls=>sendPrepared({source:'nai-generation',send:async()=>{if(++posts<4)throw refusal();return 'image';}},controls)});
+  assert.equal(result,'image');assert.equal(posts,4);assert.equal(now,30000);
+  // Delivery no longer waits for this acknowledgement; still verify actual release.
+  assert.ok(completion);await completion;
+  assert.equal(q.stats().active,0);assert.equal(q.lanes.get(hash)?.cooldownUntil,undefined);
  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 
