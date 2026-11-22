@@ -64,11 +64,12 @@ test('completed chat images load before slow queue finish and chat-save acknowle
     await page.waitForFunction(()=>{const image=document.querySelector('.miao-image-card>img');return image?.complete&&image.naturalWidth>0&&image.dataset.miaoLoadState==='ready'&&getComputedStyle(image).visibility==='visible';});
     assert.equal(await page.locator('.miao-image-load-status').isVisible(),false);
     if(stalledDecode)assert.equal(await page.locator('.miao-image-card>img').getAttribute('data-miao-decode-fallback'),'true');
-    await page.waitForFunction(()=>(window.preview.imageWrites||[]).some(item=>item.folder==='miao-nai-thumbnails'));
-    const result=await page.evaluate(()=>{
-     const p=window.preview,image=document.querySelector('.miao-image-card>img'),record=p.chat[0].miao_nai_image_swipes[0]['body:0:delivery scene'];
-     return {posts:p.calls.length,finishAcknowledged:!!p.finishAcknowledged,outcome:p.finishBody.outcome,savePending:!!p.releaseSave,progress:!!document.querySelector('.miao-image-progress'),src:image.getAttribute('src'),original:record.url};
-    });
+     const result=await page.evaluate(()=>{
+      const p=window.preview,image=document.querySelector('.miao-image-card>img'),record=p.chat[0].miao_nai_image_swipes[0]['body:0:delivery scene'];
+      return {posts:p.calls.length,finishAcknowledged:!!p.finishAcknowledged,outcome:p.finishBody.outcome,savePending:!!p.releaseSave,progress:!!document.querySelector('.miao-image-progress'),src:image.getAttribute('src'),original:record.url,files:p.imageWrites.map(item=>item.folder),generatedSourceReads:p.generatedSourceReads};
+     });
+     assert.deepEqual(result.files,format==='png'?['miao-nai']:['miao-nai','miao-nai-jpg']);
+     assert.equal(result.generatedSourceReads,0,'delivery does not refetch the generated PNG for a thumbnail');
     assert.equal(result.posts,1);assert.equal(result.finishAcknowledged,false);assert.equal(result.outcome,'success');assert.equal(result.savePending,true);assert.equal(result.progress,false);
     assert.ok(result.src.endsWith('.'+format));assert.ok(result.original.endsWith('.png'),'chat archives retain the original PNG');
     await page.evaluate(()=>window.preview.releaseSave());
@@ -77,7 +78,10 @@ test('completed chat images load before slow queue finish and chat-save acknowle
     await page.waitForFunction(()=>window.preview.finishResponseReceived===true);
     await page.evaluate(()=>window.preview.releaseQueueFinish());
     await page.waitForFunction(()=>window.preview.finishAcknowledged===true);
-    assert.equal(await page.evaluate(()=>window.preview.calls.length),1);assert.deepEqual(errors,[]);
+    assert.equal(await page.evaluate(()=>window.preview.calls.length),1);
+    assert.deepEqual(await page.evaluate(()=>window.preview.imageWrites.map(item=>item.folder)),result.files,'settled tasks do not write a background thumbnail');
+    assert.equal(await page.evaluate(()=>window.preview.generatedSourceReads),0);
+    assert.deepEqual(errors,[]);
    }finally{
     await page.evaluate(()=>{window.preview?.releaseImageSave?.();window.preview?.releaseChatDecode?.();window.preview?.releaseQueueFinish?.();window.preview?.releaseSave?.();}).catch(()=>{});await page.close();
    }

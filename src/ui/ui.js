@@ -18,7 +18,7 @@ import {onlineEncodingAvailable,resolveCustomEndpoints} from '../novelai/nai-con
 const models=[['nai-diffusion-5-full','V5 Full'],['nai-diffusion-5-curated','V5 Curated'],['nai-diffusion-4-5-full','V4.5 Full'],['nai-diffusion-4-5-curated','V4.5 Curated'],['nai-diffusion-4-full','V4 Full'],['nai-diffusion-4-curated-preview','V4 Curated'],['nai-diffusion-3','V3 Anime'],['nai-diffusion-furry-3','V3 Furry']];
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
 const panelMemory=new WeakMap();
-export function createSettingsPanel({settings,save:saveSettings,persistSettings,confirmDeleteProfiles,confirmCustomVibeOrigin,exportPromptFile,restorePromptPreview,refreshProfilePreview,getPreviewState,initialTab,initialFavorite,favorites,saveFavorite,removeFavorite,generateFavorite,sceneFromImage,collectImage,buildThumbnails,getResourceStatus,checkResources,theme,onTheme,onChange,onError,saveKey,saveCustomConnection,testImage,installDefaults,installWorld,installRegex,readResourceMacros,saveResourceMacros,readWorldOptions,saveWorldOptions,listImages,deleteImages,cleanOldImages,changeFolder,saveCapture,queueStatus,openImage,downloadImages,bindImage,onExportFormatChange,chooseFloatingIcon,checkUpdate,installUpdate,refreshPage,listVibes,importVibeFiles,exportVibeFiles,encodeVibe,deleteVibe,renameVibe,directKeyStatus,clearDirectKey,setRememberDirectKey,closeSettings}) {
+export function createSettingsPanel({settings,save:saveSettings,persistSettings,confirmDeleteProfiles,confirmCustomVibeOrigin,exportPromptFile,restorePromptPreview,refreshProfilePreview,getPreviewState,initialTab,initialFavorite,favorites,saveFavorite,removeFavorite,generateFavorite,sceneFromImage,collectImage,getResourceStatus,checkResources,theme,onTheme,onChange,onError,saveKey,saveCustomConnection,testImage,installDefaults,installWorld,installRegex,readResourceMacros,saveResourceMacros,readWorldOptions,saveWorldOptions,listImages,deleteImages,cleanOldImages,changeFolder,saveCapture,queueStatus,openImage,downloadImages,bindImage,onExportFormatChange,chooseFloatingIcon,checkUpdate,installUpdate,refreshPage,listVibes,importVibeFiles,exportVibeFiles,encodeVibe,deleteVibe,renameVibe,directKeyStatus,clearDirectKey,setRememberDirectKey,closeSettings}) {
     const memory=panelMemory.get(settings)||{galleryTop:0};panelMemory.set(settings,memory);
     const root=node('section',undefined,'miao-settings');root.id='miao-nai-settings';
     const inputSaves=createInputSaveQueue({save:saveSettings,onError}),save=()=>{editRevision++;const button=root.querySelector('.miao-save-button');if(button&&!button.disabled&&button.textContent!=='保存')button.textContent='保存';inputSaves.request();};
@@ -506,20 +506,12 @@ export function createSettingsPanel({settings,save:saveSettings,persistSettings,
             const refresh=async()=>{
                 const epoch=++folderEpoch,target=selectedFolder;list.setAttribute('aria-busy','true');selected.clear();selectedImages.clear();updateSelection();
                 try{
-                    const nextImages=await listImages(target);if(epoch!==folderEpoch)return false;allImages=nextImages.sort(compareImagesNewest);while(selection.length&&!browseArchive(allImages,selection).items.length)selection.pop();paintFolders();draw();list.removeAttribute('aria-busy');return true;
-                }catch(error){if(epoch!==folderEpoch)return false;list.removeAttribute('aria-busy');onError(error);return false;}
+                    const nextImages=await listImages(target);if(epoch!==folderEpoch||!list.isConnected)return;allImages=nextImages.sort(compareImagesNewest);while(selection.length&&!browseArchive(allImages,selection).items.length)selection.pop();paintFolders();draw();
+                }catch(error){if(epoch===folderEpoch&&list.isConnected)onError(error);}
+                finally{if(epoch===folderEpoch)list.removeAttribute('aria-busy');}
             };
             const multiButton=action(controls,'多选',()=>{multiSelect=true;draw();});
-            action(controls,'刷新列表',async()=>{
-                const target=selectedFolder;
-                if(!await refresh())return;
-                const epoch=folderEpoch;
-                const current=()=>epoch===folderEpoch&&target===selectedFolder&&activeTab==='images'&&cleanup.isConnected;
-                const result=await buildThumbnails(target);
-                if(!current())return;
-                draw();
-                if(result.failed)throw Error(`${result.failed} 张缩略图生成失败，请点击刷新列表重试。`);
-            });
+            action(controls,'刷新列表',refresh);
             const retention=node('div',undefined,'miao-history-retention');
             retention.append(node('span','清理旧图','miao-retention-label'));
             let retentionBusy=false;

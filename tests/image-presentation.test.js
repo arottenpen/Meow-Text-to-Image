@@ -41,6 +41,19 @@ test('lazy images wait until visible and a format refresh updates only bound plu
  observe([{target:element,isIntersecting:true}]);await f.presentation.jpeg('/original.png');await tick();assert.ok(element.src.endsWith('.jpg'));
  f.setFormat('png');f.presentation.refresh({querySelectorAll:()=>[element,image()]});assert.equal(element.src,'/original.png');
 });
+test('the page tree is observed only while lazy JPGs need it and is disconnected on PNG',()=>{
+ const starts=[],watched=new Set();let changed,stops=0;
+ class TreeObserver{constructor(callback){changed=callback;}observe(...args){starts.push(args);}disconnect(){stops++;}}
+ class Observer{observe(element){watched.add(element);}unobserve(element){watched.delete(element);}disconnect(){watched.clear();}}
+ const element={...image(),nodeType:1,isConnected:true,matches:()=>true,querySelectorAll:()=>[]};
+ const documentImpl={body:{},querySelectorAll:()=>[element]},f=fixture({Observer,TreeObserver,documentImpl});
+ f.setFormat('png');f.presentation.bind(element,'/original.png',{lazy:true});assert.equal(starts.length,0);
+ f.setFormat('jpg');f.presentation.refresh();assert.equal(starts.length,1);assert.ok(watched.has(element));
+ element.isConnected=false;changed([{addedNodes:[],removedNodes:[element]}]);assert.equal(watched.size,0);
+ element.isConnected=true;changed([{addedNodes:[element],removedNodes:[]}]);assert.ok(watched.has(element));
+ f.setFormat('png');f.presentation.refresh();assert.equal(stops,1);assert.equal(watched.size,0);assert.equal(element.src,'/original.png');
+ f.setFormat('jpg');f.presentation.refresh();assert.equal(starts.length,2);assert.ok(watched.has(element));assert.equal(f.reads.length,0);
+});
 test('export MIME types omit HTTP charset parameters and forgetting a deleted original invalidates its JPEG',async()=>{
  const f=fixture({fetchImage:async url=>{const blob=f.files.get(url);return blob?new Response(blob,{headers:{'Content-Type':blob.type+'; charset=utf-8'}}):new Response('',{status:404});}});
  const original=await f.presentation.file({url:'/original.png',name:'original.png'},'png');assert.equal(original.blob.type,'image/png');assert.equal(await original.blob.text(),await png.text());
@@ -79,7 +92,7 @@ test('cached images and hosts without image.decode still complete the chat load 
  const legacy=new LoadImage();f.presentation.bind(legacy,'/original.png',{decode:true});legacy.complete=true;legacy.naturalWidth=64;legacy.dispatchEvent(new Event('load'));
  assert.equal(await f.presentation.whenReady(legacy),true);assert.equal(legacy.dataset.miaoLoadState,'ready');
 });
-test('load errors release thumbnail waits and rebinding can retry the same source',async()=>{
+test('load errors settle the image state and rebinding can retry the same source',async()=>{
  const f=fixture();f.setFormat('png');const element=new LoadImage();
  f.presentation.bind(element,'/original.png',{decode:true});const failed=f.presentation.whenReady(element);element.dispatchEvent(new Event('error'));
  assert.equal(await failed,false);assert.equal(element.dataset.miaoLoadState,'error');assert.equal(element['aria-busy'],undefined);

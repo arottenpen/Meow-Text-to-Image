@@ -5,7 +5,7 @@ import {imageBlob} from './image-thumbnails.js';
 export const JPEG_FOLDER='miao-nai-jpg';
 
 // Keep original archive URLs separate from the bytes offered by native image menus.
-export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=()=>{},base=()=>location.href,documentImpl=globalThis.document,Observer=globalThis.IntersectionObserver,convert=prepareImageExport,decodeTimeoutMs=2000}){
+export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=()=>{},base=()=>location.href,documentImpl=globalThis.document,Observer=globalThis.IntersectionObserver,TreeObserver=globalThis.MutationObserver,convert=prepareImageExport,decodeTimeoutMs=2000}){
     const ready=new Map(),pending=new Map(),bindings=new WeakMap();let active=0;const waiting=[];
     const run=async(work,{priority=false}={})=>{if(active>=2)await new Promise(resolve=>priority?waiting.unshift(resolve):waiting.push(resolve));else active++;try{return await work();}finally{if(waiting.length)waiting.shift()();else active--;}};
     const jpeg=async(url,{source}={})=>{
@@ -27,11 +27,14 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
         try{const result=await work;ready.set(url,result);return result;}finally{pending.delete(url);}
     };
     const observer=Observer?new Observer(entries=>{for(const entry of entries){if(entry.target.isConnected===false){observer.unobserve(entry.target);continue;}if(entry.isIntersecting){observer.unobserve(entry.target);const binding=bindings.get(entry.target);if(binding)void present(entry.target,binding);}}}, {rootMargin:'240px'}):null;
-    if(observer&&globalThis.MutationObserver&&documentImpl?.body){
-        const images=node=>node.nodeType===1?[...(node.matches('img')?[node]:[]),...node.querySelectorAll('img')]:[];
-        const changes=new MutationObserver(records=>{for(const record of records){for(const node of record.removedNodes)for(const image of images(node))observer.unobserve(image);for(const node of record.addedNodes)for(const image of images(node)){const binding=bindings.get(image);if(binding?.lazy&&binding.format==='jpg'&&image.dataset.miaoExportState==='loading')observer.observe(image);}}});
+    let changes;
+    const watchTree=()=>{
+        if(changes||!TreeObserver||!documentImpl?.body)return;
+        const selector='img[data-miao-image-format="jpg"][data-miao-export-state="loading"]';
+        const images=node=>node.nodeType===1?[...(node.matches(selector)?[node]:[]),...node.querySelectorAll(selector)]:[];
+        changes=new TreeObserver(records=>{for(const record of records){for(const node of record.removedNodes)for(const image of images(node))observer.unobserve(image);for(const node of record.addedNodes)for(const image of images(node)){const binding=bindings.get(image);if(image.isConnected&&binding?.lazy&&!binding.presenting)observer.observe(image);}}});
         changes.observe(documentImpl.body,{childList:true,subtree:true});
-    }
+    };
     const clock=()=>globalThis.performance?.now?.()??Date.now();
     const setSource=(image,src,binding)=>{
         binding.sourceAt=clock();
@@ -82,7 +85,7 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
         if(format==='png'){setSource(image,url,binding);return;}
         // Never expose the PNG, even briefly, while a private JPG is being prepared.
         if(ready.has(url))setSource(image,ready.get(url),binding);else image.removeAttribute('src');
-        if(!ready.has(url)){if(lazy&&observer)observer.observe(image);else void present(image,binding);}
+        if(!ready.has(url)){if(lazy&&observer){watchTree();observer.observe(image);}else void present(image,binding);}
     };
     return {bind,jpeg,
         async prepareGenerated(url,data){if(getFormat()==='jpg')return jpeg(url,{source:imageBlob(data)});},
@@ -91,7 +94,13 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
             binding.lazy=false;image.loading='eager';image.fetchPriority='high';observer?.unobserve(image);
             if(binding.format==='jpg'&&image.dataset.miaoExportState==='loading')void present(image,binding);
         },
-        whenReady:image=>bindings.get(image)?.ready??Promise.resolve(true),refresh(root=documentImpl){for(const image of root.querySelectorAll('img[data-miao-original-url]')){const old=bindings.get(image);if(old)bind(image,old.url,{lazy:old.lazy,decode:old.decode,onState:old.onState});}},
+        whenReady:image=>bindings.get(image)?.ready??Promise.resolve(true),
+        refresh(root=documentImpl){
+            if(getFormat()!=='jpg'){
+                changes?.disconnect();changes=undefined;observer?.disconnect?.();
+            }
+            for(const image of root.querySelectorAll('img[data-miao-original-url]')){const old=bindings.get(image);if(old)bind(image,old.url,{lazy:old.lazy,decode:old.decode,onState:old.onState});}
+        },
         async forget(url){try{await pending.get(url);}catch{}ready.delete(url);return `user/images/${JPEG_FOLDER}/jpg-${await sha256(new URL(url,base()).pathname)}.jpg`;},
         async file(image,format=getFormat()){
             let url=format==='jpg'?await jpeg(image.url):image.url,response=await fetchImage(url);

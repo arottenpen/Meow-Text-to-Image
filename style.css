@@ -2245,9 +2245,6 @@
 .miao-favorite-editor input[type=file] {width:100%;min-width:0;min-height:44px;font:inherit;}
 .miao-favorite-list {min-width:0;}
 .miao-history-tile>.miao-button {width:100%;border:0;border-radius:0;min-height:44px;}
-.miao-history-grid img[data-thumbnail-state=missing] {
-    min-height:100px;background:var(--mi-field);font-size:12px;line-height:1.5;color:var(--mi-muted);
-}
 .miao-image-card:has(.miao-empty-tools) {width:min(480px,100%);margin:8px auto;}
 .miao-image-tools.miao-empty-tools {
     display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%;padding-top:0;
