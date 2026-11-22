@@ -54,6 +54,42 @@ test('the page tree is observed only while lazy JPGs need it and is disconnected
  f.setFormat('png');f.presentation.refresh();assert.equal(stops,1);assert.equal(watched.size,0);assert.equal(element.src,'/original.png');
  f.setFormat('jpg');f.presentation.refresh();assert.equal(starts.length,2);assert.ok(watched.has(element));assert.equal(f.reads.length,0);
 });
+function lazyFixture(options={}){
+ const watched=new Set();let intersect,starts=0,stops=0;
+ class Observer{constructor(callback){intersect=callback;}observe(element){watched.add(element);}unobserve(element){watched.delete(element);}disconnect(){watched.clear();}}
+ class TreeObserver{observe(){starts++;}disconnect(){stops++;}}
+ const f=fixture({Observer,TreeObserver,documentImpl:{body:{}},...options});
+ return {...f,watched,intersect:element=>intersect([{target:element,isIntersecting:true}]),counts:()=>({starts,stops})};
+}
+test('lazy JPG tree observation stops when the last image starts and restarts only for uncached bindings',async()=>{
+ const f=lazyFixture(),first=image(),second=image();
+ f.presentation.bind(first,'/original.png',{lazy:true});f.presentation.bind(first,'/original.png',{lazy:true});f.presentation.bind(second,'/second.png',{lazy:true});
+ assert.deepEqual(f.counts(),{starts:1,stops:0});assert.equal(f.reads.length,0);
+ f.intersect(first);assert.deepEqual(f.counts(),{starts:1,stops:0});assert.ok(f.watched.has(second));
+ f.intersect(second);assert.deepEqual(f.counts(),{starts:1,stops:1});assert.equal(f.watched.size,0);
+ await Promise.all([f.presentation.jpeg('/original.png'),f.presentation.jpeg('/second.png')]);await tick();
+ assert.ok(first.src.endsWith('.jpg'));assert.ok(second.src.endsWith('.jpg'));
+ f.presentation.bind(image(),'/original.png',{lazy:true});assert.deepEqual(f.counts(),{starts:1,stops:1});
+ const next=image();f.files.set('/next.png',png);f.presentation.bind(next,'/next.png',{lazy:true});assert.deepEqual(f.counts(),{starts:2,stops:1});
+ f.presentation.activate(next);assert.deepEqual(f.counts(),{starts:2,stops:2});await f.presentation.jpeg('/next.png');await tick();assert.ok(next.src.endsWith('.jpg'));
+});
+test('failed JPG conversion releases tree observation and rebinding can start a fresh lazy retry',async()=>{
+ let fail=true;const errors=[],f=lazyFixture({convert:async()=>{if(fail)throw Error('fixture conversion');return {blob:jpg};},onError:error=>errors.push(error)}),element=image();
+ f.presentation.bind(element,'/original.png',{lazy:true});f.intersect(element);
+ await assert.rejects(f.presentation.jpeg('/original.png'),/fixture conversion/);await tick();
+ assert.deepEqual(f.counts(),{starts:1,stops:1});assert.equal(errors.length,1);assert.equal(element.dataset.miaoExportState,'error');
+ fail=false;f.presentation.bind(element,'/original.png',{lazy:true});assert.deepEqual(f.counts(),{starts:2,stops:1});
+ f.intersect(element);await f.presentation.jpeg('/original.png');await tick();assert.deepEqual(f.counts(),{starts:2,stops:2});assert.equal(element.dataset.miaoExportState,'ready');
+});
+test('rebinding and format refresh release lazy counts without preventing later JPG observation',()=>{
+ const first=image(),second=image(),elements=[first,second],f=lazyFixture({documentImpl:{body:{},querySelectorAll:()=>elements}});
+ f.presentation.bind(first,'/original.png',{lazy:true});f.presentation.bind(second,'/second.png',{lazy:true});
+ f.setFormat('png');f.presentation.bind(first,'/original.png',{lazy:true});assert.deepEqual(f.counts(),{starts:1,stops:0});
+ f.presentation.bind(second,'/second.png',{lazy:true});assert.deepEqual(f.counts(),{starts:1,stops:1});
+ f.setFormat('jpg');f.presentation.refresh();assert.deepEqual(f.counts(),{starts:2,stops:1});
+ f.setFormat('png');f.presentation.refresh();assert.deepEqual(f.counts(),{starts:2,stops:2});assert.equal(f.watched.size,0);
+ f.setFormat('jpg');f.presentation.refresh();assert.deepEqual(f.counts(),{starts:3,stops:2});assert.equal(f.watched.size,2);assert.equal(f.reads.length,0);
+});
 test('export MIME types omit HTTP charset parameters and forgetting a deleted original invalidates its JPEG',async()=>{
  const f=fixture({fetchImage:async url=>{const blob=f.files.get(url);return blob?new Response(blob,{headers:{'Content-Type':blob.type+'; charset=utf-8'}}):new Response('',{status:404});}});
  const original=await f.presentation.file({url:'/original.png',name:'original.png'},'png');assert.equal(original.blob.type,'image/png');assert.equal(await original.blob.text(),await png.text());

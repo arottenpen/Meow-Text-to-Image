@@ -27,7 +27,12 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
         try{const result=await work;ready.set(url,result);return result;}finally{pending.delete(url);}
     };
     const observer=Observer?new Observer(entries=>{for(const entry of entries){if(entry.target.isConnected===false){observer.unobserve(entry.target);continue;}if(entry.isIntersecting){observer.unobserve(entry.target);const binding=bindings.get(entry.target);if(binding)void present(entry.target,binding);}}}, {rootMargin:'240px'}):null;
-    let changes;
+    // Only JPGs still waiting for visibility need the tree watcher. Keep detached bindings weak for remounts.
+    let changes,lazyImages=new WeakSet(),lazyCount=0;
+    const unwatch=image=>{
+        observer?.unobserve(image);
+        if(lazyImages.delete(image)&&--lazyCount===0){changes?.disconnect();changes=undefined;}
+    };
     const watchTree=()=>{
         if(changes||!TreeObserver||!documentImpl?.body)return;
         const selector='img[data-miao-image-format="jpg"][data-miao-export-state="loading"]';
@@ -71,7 +76,7 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
     };
     const present=async(image,binding)=>{
         if(bindings.get(image)!==binding||binding.format!=='jpg'||getFormat()!=='jpg'||binding.presenting)return;
-        binding.presenting=true;
+        unwatch(image);binding.presenting=true;
         try{const src=await jpeg(binding.url);if(bindings.get(image)===binding&&getFormat()==='jpg'){setSource(image,src,binding);image.dataset.miaoExportState='ready';}}
         catch(error){if(bindings.get(image)===binding&&getFormat()==='jpg'){binding.failed?.();image.dataset.miaoExportState='error';image.alt='JPG 转换失败，请刷新重试';onError(error);}}
         finally{binding.presenting=false;}
@@ -79,25 +84,25 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
     const bind=(image,url,{lazy=false,decode=false,onState}={})=>{
         const format=getFormat()==='jpg'?'jpg':'png',old=bindings.get(image);
         if(old?.url===url&&old.format===format&&old.decode===decode&&image.dataset.miaoExportState!=='error'&&image.dataset.miaoLoadState!=='error')return;
-        old?.cleanup?.();observer?.unobserve(image);const binding={url,format,lazy,decode,onState:onState??old?.onState};bindings.set(image,binding);image.dataset.miaoOriginalUrl=url;image.dataset.miaoImageFormat=format;image.dataset.miaoExportState=format==='png'||ready.has(url)?'ready':'loading';
+        old?.cleanup?.();unwatch(image);const binding={url,format,lazy,decode,onState:onState??old?.onState};bindings.set(image,binding);image.dataset.miaoOriginalUrl=url;image.dataset.miaoImageFormat=format;image.dataset.miaoExportState=format==='png'||ready.has(url)?'ready':'loading';
         if(decode)watchLoad(image,binding);else{delete image.dataset.miaoLoadState;image.removeAttribute('aria-busy');}
         if(lazy){image.loading='lazy';image.decoding='async';}
         if(format==='png'){setSource(image,url,binding);return;}
         // Never expose the PNG, even briefly, while a private JPG is being prepared.
         if(ready.has(url))setSource(image,ready.get(url),binding);else image.removeAttribute('src');
-        if(!ready.has(url)){if(lazy&&observer){watchTree();observer.observe(image);}else void present(image,binding);}
+        if(!ready.has(url)){if(lazy&&observer){lazyImages.add(image);lazyCount++;watchTree();observer.observe(image);}else void present(image,binding);}
     };
     return {bind,jpeg,
         async prepareGenerated(url,data){if(getFormat()==='jpg')return jpeg(url,{source:imageBlob(data)});},
         activate(image){
             const binding=bindings.get(image);if(!binding)return;
-            binding.lazy=false;image.loading='eager';image.fetchPriority='high';observer?.unobserve(image);
+            binding.lazy=false;image.loading='eager';image.fetchPriority='high';unwatch(image);
             if(binding.format==='jpg'&&image.dataset.miaoExportState==='loading')void present(image,binding);
         },
         whenReady:image=>bindings.get(image)?.ready??Promise.resolve(true),
         refresh(root=documentImpl){
             if(getFormat()!=='jpg'){
-                changes?.disconnect();changes=undefined;observer?.disconnect?.();
+                changes?.disconnect();changes=undefined;lazyImages=new WeakSet();lazyCount=0;observer?.disconnect?.();
             }
             for(const image of root.querySelectorAll('img[data-miao-original-url]')){const old=bindings.get(image);if(old)bind(image,old.url,{lazy:old.lazy,decode:old.decode,onState:old.onState});}
         },
