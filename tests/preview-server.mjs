@@ -12,6 +12,7 @@ publicFiles.add('tests/support/custom-connection-preview.mjs');
 publicFiles.add('src/chat/stream-scheduler.js');
 publicFiles.add('src/chat/render-scheduler.js');
 publicFiles.add('src/ui/input-save-queue.js');
+publicFiles.add('src/images/generated-image-previews.js');
 const manifest=JSON.parse(await readFile(new URL('manifest.json',root),'utf8'));
 const savedPreviewImages=new Map();
 const simpleQueueRequests=[];

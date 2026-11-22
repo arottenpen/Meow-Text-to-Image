@@ -1,15 +1,18 @@
 import {sha256} from '../platform/browser-crypto.js';
 import {prepareImageExport} from './image-export.js';
 import {imageBlob} from './image-thumbnails.js';
+import {createGeneratedImagePreviews} from './generated-image-previews.js';
 
 export const JPEG_FOLDER='miao-nai-jpg';
 
 // Keep original archive URLs separate from the bytes offered by native image menus.
-export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=()=>{},base=()=>location.href,documentImpl=globalThis.document,Observer=globalThis.IntersectionObserver,TreeObserver=globalThis.MutationObserver,convert=prepareImageExport,decodeTimeoutMs=2000}){
+export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=()=>{},base=()=>location.href,documentImpl=globalThis.document,Observer=globalThis.IntersectionObserver,TreeObserver=globalThis.MutationObserver,convert=prepareImageExport,decodeTimeoutMs=2000,urlAPI=globalThis.URL}){
     const ready=new Map(),pending=new Map(),bindings=new WeakMap();let active=0;const waiting=[];
+    const previews=createGeneratedImagePreviews({urlAPI,onRestore:image=>bindings.get(image)?.resetRead?.()});
     const run=async(work,{priority=false}={})=>{if(active>=2)await new Promise(resolve=>priority?waiting.unshift(resolve):waiting.push(resolve));else active++;try{return await work();}finally{if(waiting.length)waiting.shift()();else active--;}};
     const jpeg=async(url,{source}={})=>{
         if(ready.has(url))return ready.get(url);if(pending.has(url))return pending.get(url);
+        const fresh=!!source;
         const work=run(async()=>{
             const absolute=new URL(url,base());if(absolute.origin!==new URL(base()).origin)throw Error('请选择当前酒馆的图片');
             const name='jpg-'+await sha256(absolute.pathname),target=`/user/images/${JPEG_FOLDER}/${name}.jpg`;
@@ -22,7 +25,10 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
                 const response=await fetchImage(url);if(!response.ok)throw Error('原图读取失败：HTTP '+response.status);
                 source=await response.blob();
             }
-            const {blob}=await convert(source,name+'.png','jpg');source=null;return saveJPEG(blob,JPEG_FOLDER,name);
+            const {blob}=await convert(source,name+'.png','jpg');source=null;
+            const stored=await saveJPEG(blob,JPEG_FOLDER,name);
+            if(fresh)previews.remember(stored,blob);
+            return stored;
         },{priority:!!source});pending.set(url,work);
         try{const result=await work;ready.set(url,result);return result;}finally{pending.delete(url);}
     };
@@ -43,12 +49,27 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
     const clock=()=>globalThis.performance?.now?.()??Date.now();
     const setSource=(image,src,binding)=>{
         binding.sourceAt=clock();
+        const source=previews.source(src,image);binding.previewSource=source===src?undefined:source;
+        image.dataset.miaoReadSource=binding.previewSource?'memory':'server';
+        binding.fallback=()=>{
+            if(bindings.get(image)!==binding||!binding.previewSource||image.src!==binding.previewSource)return false;
+            binding.previewSource=undefined;binding.sourceAt=clock();previews.forget(src);return true;
+        };
+        if(!binding.decode&&binding.previewSource&&image.addEventListener){
+            image.addEventListener('error',binding.fallback,{once:true});
+            binding.previewCleanup=()=>image.removeEventListener('error',binding.fallback);
+        }
         if(binding.decode){image.dataset.miaoPrepareMs=String(Math.round(binding.sourceAt-binding.started));binding.phase('loading');}
-        image.src=src;
+        image.src=source;
         if(binding.decode&&image.complete&&image.naturalWidth)binding.loaded();
     };
     const watchLoad=(image,binding)=>{
-        let decoding=false,settled=false,timer;binding.started=clock();
+        let decoding=false,settled=false,timer,readEpoch=0;binding.started=clock();
+        binding.resetRead=()=>{
+            binding.previewSource=undefined;if(settled)return;
+            readEpoch++;clearTimeout(timer);decoding=false;binding.sourceAt=clock();
+            delete image.dataset.miaoDecodeMs;binding.phase('loading');
+        };
         delete image.dataset.miaoDecodeFallback;delete image.dataset.miaoPrepareMs;delete image.dataset.miaoReadMs;delete image.dataset.miaoDecodeMs;
         binding.phase=phase=>{image.dataset.miaoLoadPhase=phase;binding.onState?.(phase);};
         binding.ready=new Promise(resolve=>{
@@ -58,15 +79,16 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
                 if(decoding)image.dataset.miaoDecodeMs=String(Math.round(clock()-binding.loadedAt));
                 binding.phase(state);resolve(state==='ready');binding.cleanup();
             };
-            const failed=()=>finish('error');
+            const failed=()=>{if(!binding.fallback?.())finish('error');};
             const loaded=()=>{
-                if(decoding||bindings.get(image)!==binding)return;decoding=true;
+                if(decoding||bindings.get(image)!==binding)return;decoding=true;const epoch=++readEpoch;
                 binding.loadedAt=clock();image.dataset.miaoReadMs=String(Math.round(binding.loadedAt-(binding.sourceAt??binding.started)));binding.phase('decoding');
                 // Only a completed transfer may bypass a stalled WebView decode promise.
                 timer=setTimeout(()=>{
+                    if(epoch!==readEpoch)return;
                     if(image.complete&&image.naturalWidth){image.dataset.miaoDecodeFallback='true';finish('ready');}else finish('error');
                 },decodeTimeoutMs);
-                Promise.resolve().then(()=>image.decode?.()).then(()=>finish('ready'),()=>finish(image.complete&&image.naturalWidth?'ready':'error'));
+                Promise.resolve().then(()=>image.decode?.()).then(()=>{if(epoch===readEpoch)finish('ready');},()=>{if(epoch===readEpoch)finish(image.complete&&image.naturalWidth?'ready':'error');});
             };
             binding.loaded=loaded;binding.failed=failed;
             binding.cleanup=()=>{clearTimeout(timer);image.removeEventListener('load',loaded);image.removeEventListener('error',failed);resolve(false);};
@@ -84,7 +106,7 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
     const bind=(image,url,{lazy=false,decode=false,onState}={})=>{
         const format=getFormat()==='jpg'?'jpg':'png',old=bindings.get(image);
         if(old?.url===url&&old.format===format&&old.decode===decode&&image.dataset.miaoExportState!=='error'&&image.dataset.miaoLoadState!=='error')return;
-        old?.cleanup?.();unwatch(image);const binding={url,format,lazy,decode,onState:onState??old?.onState};bindings.set(image,binding);image.dataset.miaoOriginalUrl=url;image.dataset.miaoImageFormat=format;image.dataset.miaoExportState=format==='png'||ready.has(url)?'ready':'loading';
+        old?.cleanup?.();old?.previewCleanup?.();unwatch(image);const binding={url,format,lazy,decode,onState:onState??old?.onState};bindings.set(image,binding);image.dataset.miaoOriginalUrl=url;image.dataset.miaoImageFormat=format;image.dataset.miaoExportState=format==='png'||ready.has(url)?'ready':'loading';
         if(decode)watchLoad(image,binding);else{delete image.dataset.miaoLoadState;image.removeAttribute('aria-busy');}
         if(lazy){image.loading='lazy';image.decoding='async';}
         if(format==='png'){setSource(image,url,binding);return;}
@@ -93,7 +115,11 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
         if(!ready.has(url)){if(lazy&&observer){lazyImages.add(image);lazyCount++;watchTree();observer.observe(image);}else void present(image,binding);}
     };
     return {bind,jpeg,
-        async prepareGenerated(url,data){if(getFormat()==='jpg')return jpeg(url,{source:imageBlob(data)});},
+        async prepareGenerated(url,data){
+            if(getFormat()==='jpg')return jpeg(url,{source:imageBlob(data)});
+            // Skip oversized originals before allocating a decoded base64 copy.
+            if(previews.accepts(Math.ceil(String(data).length*3/4)))previews.remember(url,imageBlob(data));
+        },
         activate(image){
             const binding=bindings.get(image);if(!binding)return;
             binding.lazy=false;image.loading='eager';image.fetchPriority='high';unwatch(image);
@@ -106,7 +132,7 @@ export function createImagePresentation({getFormat,fetchImage,saveJPEG,onError=(
             }
             for(const image of root.querySelectorAll('img[data-miao-original-url]')){const old=bindings.get(image);if(old)bind(image,old.url,{lazy:old.lazy,decode:old.decode,onState:old.onState});}
         },
-        async forget(url){try{await pending.get(url);}catch{}ready.delete(url);return `user/images/${JPEG_FOLDER}/jpg-${await sha256(new URL(url,base()).pathname)}.jpg`;},
+        async forget(url){try{await pending.get(url);}catch{}previews.forget(url);previews.forget(ready.get(url));ready.delete(url);return `user/images/${JPEG_FOLDER}/jpg-${await sha256(new URL(url,base()).pathname)}.jpg`;},
         async file(image,format=getFormat()){
             let url=format==='jpg'?await jpeg(image.url):image.url,response=await fetchImage(url);
             if(format==='jpg'&&!response.ok){ready.delete(image.url);url=await jpeg(image.url);response=await fetchImage(url);}

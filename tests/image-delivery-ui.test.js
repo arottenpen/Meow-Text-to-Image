@@ -5,7 +5,7 @@ import {createRequire} from 'node:module';
 import {homedir} from 'node:os';
 const require=createRequire(import.meta.url);
 
-test('completed chat images load before slow queue finish and chat-save acknowledgements on ST and TT',{timeout:120000},async()=>{
+test('fresh chat images bypass blocked file reads, slow queue finish and chat saves on ST and TT',{timeout:120000},async()=>{
  const {chromium}=require(process.env.MIAO_PLAYWRIGHT_MODULE||`${homedir()}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright`);
  const server=spawn(process.execPath,['tests/preview-server.mjs'],{env:{...process.env,MIAO_PREVIEW_PORT:'0'},stdio:['ignore','pipe','pipe']});let browser;
  try{
@@ -46,6 +46,8 @@ test('completed chat images load before slow queue finish and chat-save acknowle
      };
      await p.emit('CHAT_CHANGED');await p.emit('CHARACTER_MESSAGE_RENDERED',0);
     },format);
+    // A saved-image GET never completes in this fixture. New display must use local bytes.
+    const fileReads=[];await page.route('**/user/images/**',route=>{fileReads.push(route.request().url());});
     await page.locator('.miao-image-card').getByRole('button',{name:'生成插图',exact:true}).click();
     await page.waitForFunction(()=>!!window.preview.finishStarted);
     await page.waitForFunction(()=>!!window.preview.imageSaveStarted);
@@ -71,7 +73,10 @@ test('completed chat images load before slow queue finish and chat-save acknowle
      assert.deepEqual(result.files,format==='png'?['miao-nai']:['miao-nai','miao-nai-jpg']);
      assert.equal(result.generatedSourceReads,0,'delivery does not refetch the generated PNG for a thumbnail');
     assert.equal(result.posts,1);assert.equal(result.finishAcknowledged,false);assert.equal(result.outcome,'success');assert.equal(result.savePending,true);assert.equal(result.progress,false);
-    assert.ok(result.src.endsWith('.'+format));assert.ok(result.original.endsWith('.png'),'chat archives retain the original PNG');
+    assert.ok(result.src.startsWith('blob:'));assert.ok(result.original.endsWith('.png'),'chat archives retain the original PNG');
+    assert.equal(await page.locator('.miao-image-card>img').getAttribute('data-miao-read-source'),'memory');
+    assert.equal(await page.evaluate(async()=>{const image=document.querySelector('.miao-image-card>img');return (await (await fetch(image.src)).blob()).type;}),format==='jpg'?'image/jpeg':'image/png');
+    assert.deepEqual(fileReads,[],'neither PNG nor JPG display may re-download a freshly saved image');
     await page.evaluate(()=>window.preview.releaseSave());
     await page.waitForFunction(()=>window.miaoTestToasts.some(toast=>toast.type==='success'&&toast.message==='生图完成'));
     assert.equal(await page.evaluate(()=>!!window.preview.finishAcknowledged),false,'completion must not require queue acknowledgement');
